@@ -1,0 +1,6 @@
+{
+  "name": "WebGPU Quantum Resonator",
+  "description": "Аналоговый аппаратный параллельный вычислитель на базе WebGPU.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
