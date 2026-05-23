@@ -139,7 +139,7 @@ struct AtomicCounters {
 struct Params1 {
     base_offset: u32,
     max_checkpoints: u32,
-    pad0: u32,
+    grid_dim_x: u32,
     pad1: u32,
 }
 
@@ -148,8 +148,9 @@ struct Params1 {
 @group(0) @binding(2) var<uniform> params1: Params1;
 
 @compute @workgroup_size(256)
-fn pass1_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-    let nonce = params1.base_offset + global_id.x;
+fn pass1_main(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(workgroup_id) group_id: vec3<u32>, @builtin(local_invocation_id) local_id: vec3<u32>) {
+    let global_flat_x = (group_id.x + group_id.y * params1.grid_dim_x) * 256u + local_id.x;
+    let nonce = params1.base_offset + global_flat_x;
     
     var a = 0x6a09e667u; var b = 0xbb67ae85u; var c = 0x3c6ef372u; var d = 0xa54ff53au;
     var e = 0x510e527fu; var f = 0x9b05688cu; var g = 0x1f83d9abu; var h = 0x5be0cd19u;
@@ -232,7 +233,7 @@ struct Params2 {
     max_checkpoints: u32,
     max_winners: u32,
     zero_target: u32,
-    pad0: u32,
+    grid_dim_x: u32,
 }
 
 struct SuccessWinner {
@@ -269,7 +270,7 @@ fn pass2_main(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(loca
     }
     workgroupBarrier();
 
-    let cp_idx = group_id.x;
+    let cp_idx = group_id.x + group_id.y * params2.grid_dim_x;
     let max_cp = atomicLoad(&counters.checkpoints_found);
     if (cp_idx >= max_cp || cp_idx >= params2.max_checkpoints) {
         return;
@@ -425,7 +426,6 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
         remaining: 0
     });
     const [logLines, setLogLines] = useState<{msg: string, type: 'evo' | 'system' | 'spam', time: string, id: number}[]>([]);
-    const [logTab, setLogTab] = useState<'evo' | 'spam'>('evo');
     const [winnersList, setWinnersList] = useState<{mutant: number, hash0: number, hash1: number, zeros: number}[]>([]);
     const winnersListRef = useRef<{mutant: number, hash0: number, hash1: number, zeros: number}[]>([]);
     const statsAccRef = useRef({ pass1Hdr: 0, pass2Hdr: 0, apoptosis: 0 });
@@ -475,6 +475,12 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                 if (parsed.winnersList) {
                     setWinnersList(parsed.winnersList);
                     winnersListRef.current = parsed.winnersList;
+                    
+                    // Recover floor state from the best winner loaded
+                    if (parsed.winnersList.length > 0) {
+                        const bestZeros = parsed.winnersList[0].zeros;
+                        mlStateRef.current.currentFloor = Math.max(22, bestZeros);
+                    }
                 }
                 if (parsed.baseNonce) metaCheckpointRef.current.baseNonce = parsed.baseNonce;
             } catch (e) {}
@@ -651,11 +657,15 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                 if (!loopEnabled.current) return;
 
                 const PASS1_WORKGROUPS = 1024 * configRef.current.intensity;
-                const pass1BatchSize = PASS1_WORKGROUPS * 256;
-                const p1Data = new Uint32Array([baseNonce, MAX_CHECKPOINTS, 0, 0]);
+                const pass1WgX = Math.min(PASS1_WORKGROUPS, 65535);
+                const pass1WgY = Math.ceil(PASS1_WORKGROUPS / pass1WgX);
+                const pass1BatchSize = pass1WgX * pass1WgY * 256;
+                const p1Data = new Uint32Array([baseNonce, MAX_CHECKPOINTS, pass1WgX, 0]);
                 device.queue.writeBuffer(params1Buffer, 0, p1Data);
                 
-                const p2Data = new Uint32Array([MAX_CHECKPOINTS, MAX_WINNERS, ZERO_TARGET, 0]);
+                const pass2WgX = Math.min(MAX_CHECKPOINTS, 65535);
+                const pass2WgY = Math.ceil(MAX_CHECKPOINTS / pass2WgX);
+                const p2Data = new Uint32Array([MAX_CHECKPOINTS, MAX_WINNERS, ZERO_TARGET, pass2WgX]);
                 device.queue.writeBuffer(params2Buffer, 0, p2Data);
 
                 const mlDataBuf = new ArrayBuffer(16);
@@ -680,7 +690,7 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                 const pass1 = encoder.beginComputePass();
                 pass1.setPipeline(pipeline1);
                 pass1.setBindGroup(0, bindGroup1);
-                pass1.dispatchWorkgroups(PASS1_WORKGROUPS);
+                pass1.dispatchWorkgroups(pass1WgX, pass1WgY, 1);
                 pass1.end();
 
                 // PASS 2: STORMTROOPERS (Indirect dispatch based on checkpoints... actually wgsl doesn't support indirect easily in simple examples, so we launch assuming max and let shader abort early)
@@ -689,7 +699,7 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                 const pass2 = encoder.beginComputePass();
                 pass2.setPipeline(pipeline2);
                 pass2.setBindGroup(0, bindGroup2);
-                pass2.dispatchWorkgroups(MAX_CHECKPOINTS); // 256 stormtroopers per checkpoint
+                pass2.dispatchWorkgroups(pass2WgX, pass2WgY, 1);
                 pass2.end();
 
                 encoder.copyBufferToBuffer(countersBuffer, 0, countersReadBuffer, 0, 16);
@@ -844,8 +854,9 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
 
                 // Add to recent ticks buffer
                 recentTicksRef.current.push(currentTick);
-                if (recentTicksRef.current.length > 50 * configRef.current.memoryScale) {
-                    recentTicksRef.current.shift();
+                const maxTicks = 50 * configRef.current.memoryScale;
+                if (recentTicksRef.current.length > maxTicks) {
+                    recentTicksRef.current.splice(0, recentTicksRef.current.length - maxTicks);
                 }
 
                 // Append after if recording
@@ -953,7 +964,7 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                                     <span className="text-[#00FF41]">{intensity}x</span>
                                 </span>
                                 <input 
-                                    type="range" min="1" max="60" step="1" 
+                                    type="range" min="1" max="1000" step="1" 
                                     value={intensity} 
                                     onChange={(e) => updateIntensity(parseInt(e.target.value))}
                                     className="w-full cursor-pointer accent-[#00FF41]"
@@ -967,7 +978,7 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                                     <span className="text-[#00FF41]">{vramScale}x</span>
                                 </span>
                                 <input 
-                                    type="range" min="1" max="10" step="1" 
+                                    type="range" min="1" max="200" step="1" 
                                     value={vramScale} 
                                     onChange={(e) => updateConfig('vramScale', parseInt(e.target.value))}
                                     className="w-full cursor-pointer accent-[#00FF41]"
@@ -981,7 +992,7 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                                     <span className="text-[#00FF41]">{memoryScale}x</span>
                                 </span>
                                 <input 
-                                    type="range" min="1" max="100" step="1" 
+                                    type="range" min="1" max="2000" step="1" 
                                     value={memoryScale} 
                                     onChange={(e) => updateConfig('memoryScale', parseInt(e.target.value))}
                                     className="w-full cursor-pointer accent-[#00FF41]"
@@ -1074,60 +1085,86 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                     <div className="p-4 border border-[#00FF41]/30 bg-black/80 flex flex-col h-64 shrink-0 overflow-hidden relative">
                         <div className="flex justify-between items-center border-b border-[#00FF41]/30 pb-2 mb-2 sticky top-0 bg-black z-10">
                             <div className="flex gap-4 items-center">
-                                <button 
-                                    onClick={() => setLogTab('evo')}
-                                    className={`text-sm font-bold uppercase ${logTab === 'evo' ? 'text-[#00FF41]' : 'text-gray-500 hover:text-gray-300'}`}>ЭВОЛЮЦИЯ</button>
-                                <button 
-                                    onClick={() => setLogTab('spam')}
-                                    className={`text-sm font-bold uppercase ${logTab === 'spam' ? 'text-[#00FF41]' : 'text-gray-500 hover:text-gray-300'}`}>ВСЕ БЛОКИ</button>
+                                <span className="text-sm font-bold uppercase text-[#00FF41]">ЖУРНАЛ СКАНИРОВАНИЯ (ВСЕ БЛОКИ)</span>
                             </div>
                             <button 
                                 onClick={() => {
-                                    const textBytes = logLines.filter(l => logTab === 'evo' ? (l.type === 'evo' || l.type === 'system') : true).map(l => `[${l.time}] ${l.msg}`).join('\n');
+                                    const textBytes = logLines.filter(l => l.type !== 'evo').map(l => `[${l.time}] ${l.msg}`).join('\n');
                                     navigator.clipboard.writeText(textBytes);
                                 }} 
                                 className="text-[10px] hover:text-white px-2 py-1 border border-[#00FF41]/30 flex items-center gap-1 transition-colors hover:bg-[#00FF41]/20">
-                                <Download size={10} /> Копировать логи
+                                <Download size={10} />
                             </button>
                         </div>
                         <div className="flex-1 overflow-y-auto text-[10px] space-y-1 opacity-80 pb-2">
-                            {logLines.filter(l => logTab === 'evo' ? (l.type === 'evo' || l.type === 'system') : true).map((l, i) => <div key={i} className={l.type === 'system' ? 'text-red-400' : ''}><span className="opacity-50">[{l.time}]</span> {l.msg}</div>)}
+                            {logLines.filter(l => l.type !== 'evo').map((l, i) => <div key={i} className={l.type === 'system' ? 'text-red-400' : ''}><span className="opacity-50">[{l.time}]</span> {l.msg}</div>)}
                         </div>
                     </div>
                 </div>
 
                 {/* Main Log/View */}
-                <div className="flex-1 flex flex-col border border-[#00FF41]/30 bg-black/80 overflow-hidden">
-                     <h2 className="text-sm font-bold uppercase border-b border-[#00FF41]/30 p-4 bg-black/80 sticky top-0 flex items-center gap-2 z-10">
-                         <Layout className="w-4 h-4" /> LEADERBOARD (TOP-10 БЛОКОВ)
-                     </h2>
-                     <div className="p-4 overflow-y-auto flex-1 text-xs">
-                         {winnersList.length === 0 ? (
-                             <div className="opacity-50 text-center mt-10">Ожидание совпадений (Target Zeros: 17)...</div>
-                         ) : (
-                             <table className="w-full text-left">
-                                 <thead>
-                                     <tr className="border-b border-[#00FF41]/30 opacity-60 text-[10px]">
-                                         <th className="pb-2">Zeros</th>
-                                         <th className="pb-2">Mutant Nonce</th>
-                                         <th className="pb-2">Hash Output</th>
-                                     </tr>
-                                 </thead>
-                                 <tbody>
-                                     {winnersList.map((w, i) => (
-                                         <tr key={i} className="border-b border-[#00FF41]/10 hover:bg-[#00FF41]/5 transition-colors">
-                                             <td className="py-2 text-[10px] font-bold text-white">{w.zeros}</td>
-                                             <td className="py-2 text-[10px]">0x{w.mutant.toString(16).padStart(8, '0')}</td>
-                                             <td className="py-2 font-bold text-yellow-400 glow-text">
-                                                 {w.hash0.toString(16).padStart(8, '0')}
-                                                 {w.hash1.toString(16).padStart(8, '0')}...
-                                             </td>
+                <div className="flex-1 flex flex-col gap-4 overflow-hidden">
+                    {/* LEADERBOARD */}
+                    <div className="flex-1 flex flex-col border border-[#00FF41]/30 bg-black/80 overflow-hidden">
+                         <h2 className="text-sm font-bold uppercase border-b border-[#00FF41]/30 p-4 bg-black/80 sticky top-0 flex items-center gap-2 z-10">
+                             <Layout className="w-4 h-4" /> LEADERBOARD (TOP-10 БЛОКОВ)
+                         </h2>
+                         <div className="p-4 overflow-y-auto flex-1 text-xs">
+                             {winnersList.length === 0 ? (
+                                 <div className="opacity-50 text-center mt-10">Ожидание совпадений (Target Zeros: 17)...</div>
+                             ) : (
+                                 <table className="w-full text-left">
+                                     <thead>
+                                         <tr className="border-b border-[#00FF41]/30 opacity-60 text-[10px]">
+                                             <th className="pb-2">Zeros</th>
+                                             <th className="pb-2">Mutant Nonce</th>
+                                             <th className="pb-2">Hash Output</th>
                                          </tr>
-                                     ))}
-                                 </tbody>
-                             </table>
-                         )}
-                     </div>
+                                     </thead>
+                                     <tbody>
+                                         {winnersList.map((w, i) => (
+                                             <tr key={i} className="border-b border-[#00FF41]/10 hover:bg-[#00FF41]/5 transition-colors">
+                                                 <td className="py-2 text-[10px] font-bold text-white">{w.zeros}</td>
+                                                 <td className="py-2 text-[10px]">0x{w.mutant.toString(16).padStart(8, '0')}</td>
+                                                 <td className="py-2 font-bold text-yellow-400 glow-text">
+                                                     {w.hash0.toString(16).padStart(8, '0')}
+                                                     {w.hash1.toString(16).padStart(8, '0')}...
+                                                 </td>
+                                             </tr>
+                                         ))}
+                                     </tbody>
+                                 </table>
+                             )}
+                         </div>
+                    </div>
+
+                    {/* EVOLUTION LOG */}
+                    <div className="h-64 flex flex-col border border-blue-500/30 bg-[#001020]/90 overflow-hidden shrink-0">
+                        <div className="flex justify-between items-center border-b border-blue-500/30 p-2 pl-4 bg-black/80 sticky top-0 z-10">
+                            <h2 className="text-sm font-bold uppercase text-blue-400 flex items-center gap-2">
+                                <Activity className="w-4 h-4" /> ЛОГ ЛИФТОВ ЭВОЛЮЦИИ
+                            </h2>
+                            <button 
+                                onClick={() => {
+                                    const textBytes = logLines.filter(l => l.type === 'evo').map(l => `[${l.time}] ${l.msg}`).join('\n');
+                                    navigator.clipboard.writeText(textBytes);
+                                }} 
+                                className="text-[10px] text-blue-400 hover:text-blue-100 px-2 py-1 border border-blue-500/30 flex items-center gap-1 transition-colors hover:bg-blue-500/20">
+                                <Download size={10} /> Копировать
+                            </button>
+                        </div>
+                        <div className="p-4 overflow-y-auto flex-1 text-[10px] space-y-1">
+                            {logLines.filter(l => l.type === 'evo').map((l, i) => (
+                                <div key={i} className="text-blue-300">
+                                    <span className="opacity-50 mr-2">[{l.time}]</span>
+                                    {l.msg}
+                                </div>
+                            ))}
+                            {logLines.filter(l => l.type === 'evo').length === 0 && (
+                                <div className="opacity-50 text-blue-300/50 text-center mt-4">Ожидание событий эволюции...</div>
+                            )}
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
