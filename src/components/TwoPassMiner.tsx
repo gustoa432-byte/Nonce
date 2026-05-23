@@ -445,6 +445,25 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
 
     const [epoch, setEpoch] = useState(1);
     const [epochTimeLeft, setEpochTimeLeft] = useState(600);
+    
+    // Performance controls
+    const [intensity, setIntensity] = useState(1);
+    const [vramScale, setVramScale] = useState(1);
+    const [memoryScale, setMemoryScale] = useState(1);
+    const [lsWriteRate, setLsWriteRate] = useState(1);
+    const configRef = useRef({ intensity: 1, vramScale: 1, memoryScale: 1, lsWriteRate: 1 });
+
+    const updateIntensity = (val: number) => {
+        setIntensity(val);
+        configRef.current.intensity = val;
+    };
+
+    const updateConfig = (key: keyof typeof configRef.current, val: number) => {
+        configRef.current[key] = val;
+        if (key === 'vramScale') setVramScale(val);
+        if (key === 'memoryScale') setMemoryScale(val);
+        if (key === 'lsWriteRate') setLsWriteRate(val);
+    };
 
     const launchPipelineRef = useRef<() => void>();
 
@@ -587,8 +606,8 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                 compute: { module: pass2Module, entryPoint: "pass2_main" }
             });
 
-            const MAX_CHECKPOINTS = 8192;
-            const MAX_WINNERS = 64;
+            const MAX_CHECKPOINTS = 8192 * configRef.current.vramScale;
+            const MAX_WINNERS = 64 * configRef.current.vramScale;
             
             const checkpointsBuffer = device.createBuffer({ size: MAX_CHECKPOINTS * 112, usage: GPUBufferUsage.STORAGE });
             const countersBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
@@ -626,12 +645,12 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
             
             let baseNonce = metaCheckpointRef.current.baseNonce;
             let iterCounter = 0;
-            const PASS1_WORKGROUPS = 1024; // 1024 * 256 = 262k Pass 1 Hashes/batch
             const ZERO_TARGET = 17; // Adjust here for difficulty
 
             const loop = async () => {
                 if (!loopEnabled.current) return;
 
+                const PASS1_WORKGROUPS = 1024 * configRef.current.intensity;
                 const pass1BatchSize = PASS1_WORKGROUPS * 256;
                 const p1Data = new Uint32Array([baseNonce, MAX_CHECKPOINTS, 0, 0]);
                 device.queue.writeBuffer(params1Buffer, 0, p1Data);
@@ -825,7 +844,7 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
 
                 // Add to recent ticks buffer
                 recentTicksRef.current.push(currentTick);
-                if (recentTicksRef.current.length > 50) {
+                if (recentTicksRef.current.length > 50 * configRef.current.memoryScale) {
                     recentTicksRef.current.shift();
                 }
 
@@ -865,9 +884,10 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                 }
                 metaCheckpointRef.current.baseNonce = baseNonce;
                 
-                // Save meta-checkpoint periodically (~every ~60 iterations ≈ 1 sec)
+                // Save meta-checkpoint periodically
                 iterCounter++;
-                if (iterCounter % 60 === 0) {
+                const writeThreshold = Math.max(1, Math.floor(60 / configRef.current.lsWriteRate));
+                if (iterCounter % writeThreshold === 0) {
                     localStorage.setItem('twopass_meta_state', JSON.stringify({
                         baseNonce: baseNonce,
                         winnersList: winnersListRef.current
@@ -923,6 +943,66 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                         >
                             {running ? 'STOP PIPELINE' : 'LAUNCH PIPELINE'}
                         </button>
+
+                        <div className="flex flex-col gap-2 border border-[#00FF41]/30 p-2 mt-2">
+                            <span className="text-[10px] uppercase opacity-70">Настройки Нагрузки Железа</span>
+                            
+                            <div className="flex flex-col gap-1">
+                                <span className="text-[9px] opacity-50 flex justify-between">
+                                    <span>GPU: ХЕШ ВОРКЕРЫ (Увеличит нагрузку на видеоядро)</span>
+                                    <span className="text-[#00FF41]">{intensity}x</span>
+                                </span>
+                                <input 
+                                    type="range" min="1" max="60" step="1" 
+                                    value={intensity} 
+                                    onChange={(e) => updateIntensity(parseInt(e.target.value))}
+                                    className="w-full cursor-pointer accent-[#00FF41]"
+                                />
+                                <span className="text-[8px] text-[#00FF41]/50 mb-2">~ {(262144 * intensity).toLocaleString()} хешей/кадр</span>
+                            </div>
+
+                            <div className="flex flex-col gap-1">
+                                <span className="text-[9px] opacity-50 flex justify-between">
+                                    <span>VRAM: ВЫДЕЛЕНИЕ ПАМЯТИ (Применится при перезапуске)</span>
+                                    <span className="text-[#00FF41]">{vramScale}x</span>
+                                </span>
+                                <input 
+                                    type="range" min="1" max="10" step="1" 
+                                    value={vramScale} 
+                                    onChange={(e) => updateConfig('vramScale', parseInt(e.target.value))}
+                                    className="w-full cursor-pointer accent-[#00FF41]"
+                                />
+                                <span className="text-[8px] text-[#00FF41]/50 mb-2">Объем буферов: {8192 * vramScale} слотов</span>
+                            </div>
+
+                            <div className="flex flex-col gap-1">
+                                <span className="text-[9px] opacity-50 flex justify-between">
+                                    <span>RAM / HEAP: РАЗМЕР ХВОСТОВ (JS Массивы)</span>
+                                    <span className="text-[#00FF41]">{memoryScale}x</span>
+                                </span>
+                                <input 
+                                    type="range" min="1" max="100" step="1" 
+                                    value={memoryScale} 
+                                    onChange={(e) => updateConfig('memoryScale', parseInt(e.target.value))}
+                                    className="w-full cursor-pointer accent-[#00FF41]"
+                                />
+                                <span className="text-[8px] text-[#00FF41]/50 mb-2">{50 * memoryScale} записей в хвосте</span>
+                            </div>
+
+                            <div className="flex flex-col gap-1">
+                                <span className="text-[9px] opacity-50 flex justify-between">
+                                    <span>LOCALSTORAGE: ЧАСТОТА ЗАПИСИ (I/O)</span>
+                                    <span className="text-[#00FF41]">{lsWriteRate}x</span>
+                                </span>
+                                <input 
+                                    type="range" min="1" max="60" step="1" 
+                                    value={lsWriteRate} 
+                                    onChange={(e) => updateConfig('lsWriteRate', parseInt(e.target.value))}
+                                    className="w-full cursor-pointer accent-[#00FF41]"
+                                />
+                                <span className="text-[8px] text-[#00FF41]/50">Запись каждые {Math.max(1, Math.floor(60 / lsWriteRate))} итераций</span>
+                            </div>
+                        </div>
 
                         <button 
                             onClick={exportCSV}
