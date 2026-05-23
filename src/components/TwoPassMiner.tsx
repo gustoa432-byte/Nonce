@@ -475,12 +475,6 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                 if (parsed.winnersList) {
                     setWinnersList(parsed.winnersList);
                     winnersListRef.current = parsed.winnersList;
-                    
-                    // Recover floor state from the best winner loaded
-                    if (parsed.winnersList.length > 0) {
-                        const bestZeros = parsed.winnersList[0].zeros;
-                        mlStateRef.current.currentFloor = Math.max(22, bestZeros);
-                    }
                 }
                 if (parsed.baseNonce) metaCheckpointRef.current.baseNonce = parsed.baseNonce;
             } catch (e) {}
