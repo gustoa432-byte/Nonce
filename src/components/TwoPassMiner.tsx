@@ -299,6 +299,7 @@ fn pass2_main(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(loca
         // Обычный симбиоз
         mutant_nonce = mutant_nonce ^ (1u << (local_id.x % 32u));
     }
+    
     w[15] = mutant_nonce;
 
     for (var i = 16u; i < 64u; i++) {
@@ -429,6 +430,27 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
     const [winnersList, setWinnersList] = useState<{mutant: number, hash0: number, hash1: number, zeros: number}[]>([]);
     const winnersListRef = useRef<{mutant: number, hash0: number, hash1: number, zeros: number}[]>([]);
     const statsAccRef = useRef({ pass1Hdr: 0, pass2Hdr: 0, apoptosis: 0 });
+    type FractalNode = { centerNonce: number, minNonce: number, maxNonce: number, maxFloor: number, mask: number, weight: number };
+    type FractalLevel = { minFloor: number, maxFloor: number, limit: number, nodes: FractalNode[] };
+    const TOTAL_MEMORY_NODES = 100000;
+
+    const timePressureRef = useRef({
+        previousDeltaT: 750,
+        stuckTicks: 0,
+        lastFloor: 0,
+        lastDispatchTime: 0,
+        forceVirusMutation: false,
+        anchorChain: [] as {nonce: number, floor: number, mask: number}[],
+        currentAnchorIndex: -1,
+        deadZones: [] as {startNonce: number, endNonce: number, mask: number, floorLimit: number}[],
+        maskPageRank: {} as Record<number, {weight: number, successfulJumps: number, deadEnds: number}>,
+        fractalMemory: {
+            L1_BASE: { minFloor: 17, maxFloor: 19, limit: TOTAL_MEMORY_NODES * 0.50, nodes: [] } as FractalLevel,
+            L2_MID:  { minFloor: 20, maxFloor: 25, limit: TOTAL_MEMORY_NODES * 0.25, nodes: [] } as FractalLevel,
+            L3_DEEP: { minFloor: 26, maxFloor: 40, limit: TOTAL_MEMORY_NODES * 0.125, nodes: [] } as FractalLevel,
+            L4_SINGULARITY: { minFloor: 41, maxFloor: 64, limit: TOTAL_MEMORY_NODES * 0.125, nodes: [] } as FractalLevel
+        }
+    });
     
     const gpuRef = useRef<{ جهاز: GPUDevice | null } | null>(null);
     const loopEnabled = useRef(false);
@@ -444,7 +466,6 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
     });
 
     const [epoch, setEpoch] = useState(1);
-    const [epochTimeLeft, setEpochTimeLeft] = useState(600);
     
     // Performance controls
     const [intensity, setIntensity] = useState(1);
@@ -465,7 +486,71 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
         if (key === 'lsWriteRate') setLsWriteRate(val);
     };
 
-    const launchPipelineRef = useRef<() => void>();
+    const launchPipelineRef = useRef<(() => void) | undefined>(undefined);
+
+    const compressBrainToDNA = () => {
+        let dna = {
+            r: timePressureRef.current.maskPageRank,
+            f: [] as number[][]
+        };
+        for (let levelKey in timePressureRef.current.fractalMemory) {
+            let level = timePressureRef.current.fractalMemory[levelKey as keyof typeof timePressureRef.current.fractalMemory];
+            for (let node of level.nodes) {
+                dna.f.push([node.maxFloor, node.minNonce, node.maxNonce, node.mask, Math.round(node.weight * 100) / 100]);
+            }
+        }
+        return JSON.stringify(dna);
+    };
+
+    const loadBrainFromDNA = (dnaString: string) => {
+        if (!dnaString) return false;
+        try {
+            let dna = JSON.parse(dnaString);
+            timePressureRef.current.maskPageRank = dna.r || {};
+            
+            for (let k in timePressureRef.current.fractalMemory) {
+                timePressureRef.current.fractalMemory[k as keyof typeof timePressureRef.current.fractalMemory].nodes = [];
+            }
+            
+            const getFractalLevel = (floor: number) => {
+                if (floor <= timePressureRef.current.fractalMemory.L1_BASE.maxFloor) return timePressureRef.current.fractalMemory.L1_BASE;
+                if (floor <= timePressureRef.current.fractalMemory.L2_MID.maxFloor) return timePressureRef.current.fractalMemory.L2_MID;
+                if (floor <= timePressureRef.current.fractalMemory.L3_DEEP.maxFloor) return timePressureRef.current.fractalMemory.L3_DEEP;
+                return timePressureRef.current.fractalMemory.L4_SINGULARITY;
+            };
+
+            for (let gene of (dna.f || [])) {
+                let floor = gene[0];
+                let level = getFractalLevel(floor);
+                level.nodes.push({
+                    centerNonce: gene[1] + Math.floor((gene[2] - gene[1])/2),
+                    minNonce: gene[1],
+                    maxNonce: gene[2],
+                    maxFloor: gene[0],
+                    mask: gene[3],
+                    weight: gene[4]
+                });
+            }
+            addLog(`🧬 ДНК УСПЕШНО ИМПЛАНТИРОВАНА. Восстановлено ${dna.f?.length || 0} синапсов.`, 'system');
+            return true;
+        } catch (e) {
+            console.error("Ошибка имплантации ДНК:", e);
+            return false;
+        }
+    };
+
+    const exportDNA = () => {
+        let dnaString = compressBrainToDNA();
+        navigator.clipboard.writeText(dnaString);
+        alert("ДНК скопирована в буфер обмена. Сохраните этот текст в блокнот или Telegram!");
+    };
+
+    const importDNA = () => {
+        let input = prompt("Вставьте строку ДНК Роя:");
+        if (input) {
+            loadBrainFromDNA(input);
+        }
+    };
 
     useEffect(() => {
         const saved = localStorage.getItem('twopass_meta_state');
@@ -485,22 +570,21 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                 setRecordedSlots(JSON.parse(savedEvo));
             } catch (e) {}
         }
+        const savedDNA = localStorage.getItem('QuantumMinerDNA');
+        if (savedDNA) {
+            loadBrainFromDNA(savedDNA);
+        }
+        
+        const autoSaveTimer = setInterval(() => {
+            let dnaString = compressBrainToDNA();
+            localStorage.setItem('QuantumMinerDNA', dnaString);
+        }, 30000);
         
         if (launchPipelineRef.current) launchPipelineRef.current();
 
-        const timerId = setInterval(() => {
-            setEpochTimeLeft(prev => {
-                if (prev <= 1) {
-                    setEpoch(e => e + 1);
-                    return 600;
-                }
-                return prev - 1;
-            });
-        }, 1000);
-
         return () => {
             loopEnabled.current = false;
-            clearInterval(timerId);
+            clearInterval(autoSaveTimer);
         };
     }, []);
 
@@ -647,6 +731,87 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
             let iterCounter = 0;
             const ZERO_TARGET = 17; // Adjust here for difficulty
 
+            const getFractalLevel = (floor: number) => {
+                if (floor <= timePressureRef.current.fractalMemory.L1_BASE.maxFloor) return timePressureRef.current.fractalMemory.L1_BASE;
+                if (floor <= timePressureRef.current.fractalMemory.L2_MID.maxFloor) return timePressureRef.current.fractalMemory.L2_MID;
+                if (floor <= timePressureRef.current.fractalMemory.L3_DEEP.maxFloor) return timePressureRef.current.fractalMemory.L3_DEEP;
+                return timePressureRef.current.fractalMemory.L4_SINGULARITY;
+            };
+
+            const addSynapticLink = (nonce: number, floor: number, mask: number, weight: number) => {
+                let level = getFractalLevel(floor);
+                
+                let consolidated = false;
+                for (let node of level.nodes) {
+                    if (node.mask === mask && Math.abs(node.centerNonce - nonce) < 1000000) {
+                        node.minNonce = Math.min(node.minNonce, nonce);
+                        node.maxNonce = Math.max(node.maxNonce, nonce);
+                        node.weight += weight;
+                        if (floor > node.maxFloor) node.maxFloor = floor;
+                        consolidated = true;
+                        break;
+                    }
+                }
+                
+                if (!consolidated) {
+                    if (level.nodes.length >= level.limit) {
+                        level.nodes.sort((a, b) => a.weight - b.weight);
+                        level.nodes.shift(); 
+                    }
+                    level.nodes.push({
+                        centerNonce: nonce,
+                        minNonce: nonce,
+                        maxNonce: nonce,
+                        maxFloor: floor,
+                        mask: mask,
+                        weight: weight
+                    });
+                }
+            };
+
+            const updateMaskRank = (mask: number, isSuccess: boolean, isDeadZone: boolean) => {
+                if (!timePressureRef.current.maskPageRank[mask]) {
+                    timePressureRef.current.maskPageRank[mask] = { weight: 1.0, successfulJumps: 0, deadEnds: 0 };
+                }
+                
+                let stats = timePressureRef.current.maskPageRank[mask];
+                
+                if (isSuccess) {
+                    stats.successfulJumps++;
+                    stats.weight = stats.weight * 1.5; 
+                }
+                
+                if (isDeadZone) {
+                    stats.deadEnds++;
+                    stats.weight = stats.weight * 0.5; 
+                }
+            };
+            
+            const getTopRankedMask = () => {
+                let masks = Object.keys(timePressureRef.current.maskPageRank);
+                
+                if (masks.length < 5 || Math.random() < 0.2) { 
+                    return Math.floor(Math.random() * 0xFFFFFFFF) >>> 0; 
+                }
+                
+                let totalWeight = 0;
+                for (let m of masks) {
+                    totalWeight += timePressureRef.current.maskPageRank[Number(m)].weight;
+                }
+                
+                let randomThreshold = Math.random() * totalWeight;
+                let cumulativeWeight = 0;
+                
+                for (let m of masks) {
+                    cumulativeWeight += timePressureRef.current.maskPageRank[Number(m)].weight;
+                    if (cumulativeWeight >= randomThreshold) {
+                        return Number(m); 
+                    }
+                }
+                
+                return Math.floor(Math.random() * 0xFFFFFFFF) >>> 0; 
+            };
+
             const loop = async () => {
                 if (!loopEnabled.current) return;
 
@@ -783,6 +948,81 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                     }
                 }
 
+                const now = Date.now();
+                const currentDeltaT = timePressureRef.current.lastDispatchTime > 0 ? (now - timePressureRef.current.lastDispatchTime) : 750;
+                const dT = currentDeltaT - timePressureRef.current.previousDeltaT;
+
+                if (!newFloorReached && mlStateRef.current.currentFloor < 25) {
+                    timePressureRef.current.stuckTicks++;
+                } else {
+                    timePressureRef.current.stuckTicks = 0;
+                }
+                
+                // Фиксация Крюка (Чекпоинт в цепь)
+                if (newFloorReached || (dT < -80 && mlStateRef.current.currentFloor >= 20)) {
+                    if (newFloorReached) {
+                        const msg = `⚓ ЧЕКПОИНТ: Зафиксирован этаж ${mlStateRef.current.currentFloor}. Сохраняем в цепь.`;
+                        addLog(msg, 'evo');
+                        timePressureRef.current.anchorChain.push({
+                            nonce: baseNonce,
+                            floor: mlStateRef.current.currentFloor,
+                            mask: mlStateRef.current.viralMask
+                        });
+                        timePressureRef.current.currentAnchorIndex = timePressureRef.current.anchorChain.length - 1;
+                        timePressureRef.current.stuckTicks = 0;
+                        updateMaskRank(mlStateRef.current.viralMask, true, false);
+                        addSynapticLink(baseNonce, mlStateRef.current.currentFloor, mlStateRef.current.viralMask, 1.0);
+                    }
+
+                    if (dT < -80 && mlStateRef.current.currentFloor >= 20) {
+                        const msg = `💥 РАЗРЫВ МЕМБРАНЫ (NDR): ${timePressureRef.current.previousDeltaT}ms -> ${currentDeltaT}ms! Триггер СИНГУЛЯРНОСТИ!`;
+                        addLog(msg, 'evo');
+                    }
+                    mlStateRef.current.stagnationCounter = 9999;
+                }
+
+                if (timePressureRef.current.stuckTicks > 5 && (dT > 0 || currentDeltaT > 850)) {
+                    let rollbackAnchor = timePressureRef.current.currentAnchorIndex > 0 ? timePressureRef.current.anchorChain[timePressureRef.current.currentAnchorIndex - 1] : { nonce: baseNonce, floor: mlStateRef.current.currentFloor, mask: mlStateRef.current.viralMask };
+                    let zoneStart = rollbackAnchor.nonce;
+                    let zoneEnd = baseNonce;
+                    
+                    timePressureRef.current.deadZones.push({
+                        startNonce: Math.min(zoneStart, zoneEnd),
+                        endNonce: Math.max(zoneStart, zoneEnd),
+                        mask: mlStateRef.current.viralMask,
+                        floorLimit: timePressureRef.current.lastFloor
+                    });
+                    
+                    updateMaskRank(mlStateRef.current.viralMask, false, true);
+                    
+                    const dzMsg = `🌌 ПРОСТРАНСТВО ОТСЕЧЕНО: Заблокирован диапазон от ${Math.min(zoneStart, zoneEnd)} до ${Math.max(zoneStart, zoneEnd)} для маски 0x${mlStateRef.current.viralMask.toString(16)}`;
+                    console.log(dzMsg);
+                    addLog(dzMsg, 'system');
+
+                    if (timePressureRef.current.currentAnchorIndex > 0) {
+                        timePressureRef.current.currentAnchorIndex--;
+                        let currentRollback = timePressureRef.current.anchorChain[timePressureRef.current.currentAnchorIndex];
+                        const msg = `⏪ ОТКАТ (n-1): Тупик. Возврат на этаж ${currentRollback.floor} (Нонс: ${currentRollback.nonce})`;
+                        addLog(msg, 'system');
+                        
+                        nextBaseNonce = currentRollback.nonce;
+                        mlStateRef.current.currentFloor = currentRollback.floor;
+                        baseNonce = nextBaseNonce;
+                        metaCheckpointRef.current.baseNonce = baseNonce;
+                        
+                        // Меняем маску для отталкивания на основе PageRank
+                        mlStateRef.current.viralMask = getTopRankedMask();
+                    } else {
+                        const msg = `⚠️ ВЯЗКОСТЬ: Топчемся на ${mlStateRef.current.currentFloor} эт. ${timePressureRef.current.stuckTicks} тиков. Сброс (Hard Reset).`;
+                        addLog(msg, 'system');
+                        timePressureRef.current.forceVirusMutation = true;
+                    }
+                    timePressureRef.current.stuckTicks = 0;
+                }
+
+                timePressureRef.current.previousDeltaT = currentDeltaT;
+                timePressureRef.current.lastDispatchTime = now;
+
                 const STAGNATION_LIMIT = 150;
                 if (newFloorReached) {
                     mlStateRef.current.stagnationCounter = 0;
@@ -793,7 +1033,7 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
 
                 // === ВСПЫШКА ВИРУСА ===
                 if (mlStateRef.current.stagnationCounter > 150) {
-                    if (mlStateRef.current.currentFloor % 2 !== 0) { // Дыхание: работаем только в Диастолу
+                    if (mlStateRef.current.currentFloor % 2 !== 0 || mlStateRef.current.stagnationCounter > 9000) { // Дыхание: работаем только в Диастолу
                         // 1. Читаем физику роя
                         let swarmHash = Math.abs(oracleState.x * 1000 + oracleState.y * 1000 + oracleState.z * 1000);
                         
@@ -803,11 +1043,17 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                         
                         // 3. Вычисляем Резонансный Бит
                         let resonantBit = Math.floor(swarmHash + momentumHash + mlStateRef.current.viralStrikes) % 32;
-                        
-                        mlStateRef.current.viralMask = 1 << resonantBit;
+                        let newMask = 1 << resonantBit;
+
+                        if (timePressureRef.current.forceVirusMutation) {
+                            newMask = getTopRankedMask();
+                            timePressureRef.current.forceVirusMutation = false;
+                        }
+
+                        mlStateRef.current.viralMask = newMask;
                         mlStateRef.current.viralStrikes++; // Вращаем барабан на случай следующей неудачи
                         
-                        const msg = `☣️ СИНГУЛЯРНОСТЬ: Рой и RAM активированы. Сдвиг бита №${resonantBit} (Удар ${mlStateRef.current.viralStrikes})`;
+                        const msg = `☣️ СИНГУЛЯРНОСТЬ: Рой и RAM активированы. Маска 0x${newMask.toString(16)} (Удар ${mlStateRef.current.viralStrikes})`;
                         console.log(msg);
                         addLog(msg, 'evo');
                         
@@ -885,8 +1131,74 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                 if (nextBaseNonce !== null) {
                     baseNonce = nextBaseNonce;
                 } else {
-                    baseNonce += pass1BatchSize;
+                    let navigated = false;
+                    // Фрактальная Навигация
+                    if (Math.random() < 0.3) {
+                        const levels = [
+                            timePressureRef.current.fractalMemory.L1_BASE,
+                            timePressureRef.current.fractalMemory.L2_MID,
+                            timePressureRef.current.fractalMemory.L3_DEEP,
+                            timePressureRef.current.fractalMemory.L4_SINGULARITY
+                        ];
+                        
+                        let currentRange = { min: 0, max: 0xFFFFFFFF };
+                        let targetNode: { centerNonce: number, minNonce: number, maxNonce: number, maxFloor: number, mask: number, weight: number } | null = null;
+                        
+                        for (let level of levels) {
+                            let bestNode: typeof targetNode = null;
+                            for (let node of level.nodes) {
+                                if (node.minNonce >= currentRange.min && node.maxNonce <= currentRange.max) {
+                                    if (!bestNode || node.weight > bestNode.weight) {
+                                        bestNode = node;
+                                    }
+                                }
+                            }
+                            if (bestNode) {
+                                targetNode = bestNode;
+                                currentRange.min = bestNode.minNonce - 1000000;
+                                currentRange.max = bestNode.maxNonce + 1000000;
+                            } else {
+                                break;
+                            }
+                        }
+                        
+                        if (targetNode && (baseNonce < targetNode.minNonce || baseNonce > targetNode.maxNonce)) {
+                            const targetNonce = targetNode.maxNonce; // прыгаем на край диапазона, чтобы углубить его
+                            if (targetNonce > baseNonce) { // двигаемся только вперед
+                                const msg = `🌌 ФРАКТАЛЬНЫЙ СКАЧОК: Переход к узлу ${targetNode.maxFloor}-го этажа (Нонс: ${targetNonce})`;
+                                console.log(msg);
+                                addLog(msg, 'evo');
+                                baseNonce = targetNonce;
+                                navigated = true;
+                            }
+                        }
+                    }
+
+                    if (!navigated) {
+                        baseNonce += pass1BatchSize;
+                    }
                 }
+
+                // Предиктивный фильтр: Квантовый прыжок через диапазоны
+                let isInsideDeadZone = true;
+                while (isInsideDeadZone) {
+                    isInsideDeadZone = false;
+                    for (let i = 0; i < timePressureRef.current.deadZones.length; i++) {
+                        let zone = timePressureRef.current.deadZones[i];
+                        
+                        if (baseNonce >= zone.startNonce && baseNonce <= zone.endNonce) {
+                            if (mlStateRef.current.viralMask === zone.mask) {
+                                const msg = `⚡ ПРЫЖОК СКВОЗЬ ПРОСТРАНСТВО: Пропуск мертвой зоны. Сдвиг на границу.`;
+                                console.log(msg);
+                                addLog(msg, 'evo');
+                                baseNonce = zone.endNonce + 1000000; 
+                                isInsideDeadZone = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+
                 metaCheckpointRef.current.baseNonce = baseNonce;
                 
                 // Save meta-checkpoint periodically
@@ -938,7 +1250,15 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                     <div className="p-4 border border-[#00FF41]/30 bg-black/80 flex flex-col gap-4 shadow-[0_0_15px_rgba(0,255,65,0.1)]">
                         <h2 className="text-sm font-bold uppercase border-b border-[#00FF41]/30 pb-2 mb-2 flex items-center justify-between gap-2">
                             <span className="flex items-center gap-2"><Shield className="w-4 h-4" /> Coordinator</span>
-                            <span className="text-[#FF00FF]">EPOCH {epoch} ({Math.floor(epochTimeLeft / 60)}:{(epochTimeLeft % 60).toString().padStart(2, '0')})</span>
+                            <div className="flex items-center gap-2">
+                                <span className="text-[#FF00FF]">EPOCH {epoch}</span>
+                                <button 
+                                    onClick={() => setEpoch(e => e + 1)}
+                                    className="px-2 py-0.5 text-[10px] border border-[#FF00FF]/50 bg-[#FF00FF]/10 text-[#FF00FF] hover:bg-[#FF00FF] hover:text-white transition-colors uppercase"
+                                >
+                                    Смена Эпохи
+                                </button>
+                            </div>
                         </h2>
                         {error && <div className="text-[#FF3E3E] text-xs p-2 bg-[#FF3E3E]/10 border border-[#FF3E3E]/30">{error}</div>}
                         
@@ -1016,7 +1336,22 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                             <Download className="w-3 h-3" /> ВЫГРУЗИТЬ ЧЕКПОИНТ И ЛИДЕРБОРД (CSV)
                         </button>
 
-                        <div className="mt-2 border border-blue-500/30 bg-blue-900/10 p-2 flex flex-col gap-2">
+                        <div className="flex gap-2 w-full mt-2">
+                            <button 
+                                onClick={exportDNA}
+                                className="w-1/2 py-2 font-bold uppercase transition-colors flex justify-center items-center gap-2 border border-[#FF00FF]/50 bg-[#FF00FF]/10 text-[#FF00FF] hover:bg-[#FF00FF]/30 text-xs"
+                            >
+                                СКОПИРОВАТЬ ДНК
+                            </button>
+                            <button 
+                                onClick={importDNA}
+                                className="w-1/2 py-2 font-bold uppercase transition-colors flex justify-center items-center gap-2 border border-[#FF00FF]/50 bg-[#FF00FF]/10 text-[#FF00FF] hover:bg-[#FF00FF]/30 text-xs"
+                            >
+                                ИМПЛАНТИРОВАТЬ
+                            </button>
+                        </div>
+
+                        <div className="mt-4 border border-blue-500/30 bg-blue-900/10 p-2 flex flex-col gap-2">
                             <div className="flex justify-between text-[10px] uppercase text-blue-400">
                                 <span>RECORDED EVOLUTION SLOTS</span>
                                 <span>{recordedSlots.length} / MAX</span>

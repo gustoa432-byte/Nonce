@@ -563,6 +563,14 @@ export function CryptoRaymarcher({ onClose, discoveries, setDiscoveries, topDisc
             let hashrateAccumulator = 0;
             let lastTelemetryTime = performance.now();
 
+            // Фрактальная Память (Генетические Мозги)
+            const memoryBrain = {
+                L1_BASE: { minFloor: 1, maxFloor: 10, limit: 128, nodes: [] as {minNonce: number, maxNonce: number, weight: number}[] },
+                L2_MID: { minFloor: 11, maxFloor: 25, limit: 64, nodes: [] as {minNonce: number, maxNonce: number, weight: number}[] },
+                L3_DEEP: { minFloor: 26, maxFloor: 40, limit: 32, nodes: [] as {minNonce: number, maxNonce: number, weight: number}[] },
+                L4_SINGULARITY: { minFloor: 41, maxFloor: 64, limit: 32, nodes: [] as {minNonce: number, maxNonce: number, weight: number}[] }
+            };
+
             const render = (time: number) => {
                 animationId = requestAnimationFrame(render);
                 
@@ -594,6 +602,21 @@ export function CryptoRaymarcher({ onClose, discoveries, setDiscoveries, topDisc
                         genesisHeader[17] = cryptoRand[0];
                         genesisHeader[18] = cryptoRand[1];
 
+                        // ФРАКТАЛЬНАЯ НАВИГАЦИЯ (МОЗГИ РОЯ)
+                        let navigated = false;
+                        if (Math.random() < 0.3) {
+                            const levels = [memoryBrain.L1_BASE, memoryBrain.L2_MID, memoryBrain.L3_DEEP, memoryBrain.L4_SINGULARITY];
+                            for (let level of levels) {
+                                if (level.nodes.length > 0) {
+                                    // Прыжок в самую перспективную зону
+                                    let bestNode = level.nodes[Math.floor(Math.random() * level.nodes.length)];
+                                    nonce = bestNode.maxNonce + 1000;
+                                    navigated = true;
+                                    break;
+                                }
+                            }
+                        }
+
                         const AVALANCHE = 32768; // Boost to 800k H/s
                         for (let i = 0; i < AVALANCHE; i++) {
                             nonce = (nonce + 1) >>> 0;
@@ -622,6 +645,20 @@ export function CryptoRaymarcher({ onClose, discoveries, setDiscoveries, topDisc
                         hashrateAccumulator += AVALANCHE;
 
                         device.queue.writeBuffer(entropyBuffer, 0, cpuEntropy);
+
+                        // ЧЕКПОИНТ В ПАМЯТЬ
+                        if (batchMaxZeros >= 14) {
+                            if (batchMaxZeros <= memoryBrain.L1_BASE.maxFloor) {
+                                memoryBrain.L1_BASE.nodes.push({minNonce: batchBestNonce - 5000, maxNonce: batchBestNonce, weight: 1});
+                                if (memoryBrain.L1_BASE.nodes.length > memoryBrain.L1_BASE.limit) memoryBrain.L1_BASE.nodes.shift();
+                            } else if (batchMaxZeros <= memoryBrain.L2_MID.maxFloor) {
+                                memoryBrain.L2_MID.nodes.push({minNonce: batchBestNonce - 5000, maxNonce: batchBestNonce, weight: 2});
+                                if (memoryBrain.L2_MID.nodes.length > memoryBrain.L2_MID.limit) memoryBrain.L2_MID.nodes.shift();
+                            } else {
+                                memoryBrain.L3_DEEP.nodes.push({minNonce: batchBestNonce - 5000, maxNonce: batchBestNonce, weight: 3});
+                                if (memoryBrain.L3_DEEP.nodes.length > memoryBrain.L3_DEEP.limit) memoryBrain.L3_DEEP.nodes.shift();
+                            }
+                        }
 
                         if (batchMaxZeros >= 18) {
                             const hashHex = Array.from(batchBestHashData).map(w => w.toString(16).padStart(8, '0')).join('');
