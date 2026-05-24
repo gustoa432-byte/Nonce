@@ -57,6 +57,12 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
     const [diaphragmIntensityUI, setDiaphragmIntensityUI] = useState(1.0);
     const diaphragmIntensityRef = useRef(1.0);
 
+    const [voxelMode, setVoxelMode] = useState(false);
+    const voxelModeRef = useRef(false);
+
+    const [gridMode, setGridMode] = useState(false);
+    const gridModeRef = useRef(false);
+
     const handleContextMenu = (e: React.MouseEvent) => {
         e.preventDefault();
         const newVal = !diaphragmOnRef.current;
@@ -152,6 +158,12 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                     return mix(d2, -d1, h) + k * h * (1.0 - h);
                 }
 
+                fn hsv2rgb(c: vec3<f32>) -> vec3<f32> {
+                    var K = vec4<f32>(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+                    var p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+                    return c.z * mix(K.xxx, clamp(p - K.xxx, vec3<f32>(0.0), vec3<f32>(1.0)), c.y);
+                }
+
                 fn hash3(p: vec3<f32>) -> u32 {
                     var x = bitcast<u32>(p.x) * 114514u;
                     var y = bitcast<u32>(p.y) * 1919810u;
@@ -171,7 +183,7 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                     let cell = floor((pos + vec3<f32>(c*0.5)) / c);
                     let p_base = pos - cell * c;
 
-                    let p = p_base + vec3<f32>(
+                    var p = p_base + vec3<f32>(
                         sin(p_base.y * 3.0 + t * 2.0),
                         cos(p_base.z * 3.0 + t * 2.0),
                         sin(p_base.x * 3.0 + t * 2.0)
@@ -180,24 +192,68 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                     let idx = u32(abs(cell.x + cell.y * 32.0 + cell.z * 1024.0)) % 1024u;
                     let seed = hash3(cell);
                     let nzeros = entropyBuffer[idx];
+                    let nz = f32(nzeros);
 
-                    let offset = vec3<f32>(
+                    var offset = vec3<f32>(
                         sin(t*2.0 + f32(seed)), 
                         cos(t*3.0 + f32(seed)), 
                         sin(t*1.5 - f32(seed))
                     ) * 0.5 * (1.0 + intensity);
                     
-                    let rad = 0.6 + intensity * 0.3 + min(f32(nzeros) * 0.05, 1.5);
-                    let d = sdSphere(p - offset, rad);
+                    var rad = 0.6 + intensity * 0.3;
+                    if (nz <= 17.0) {
+                        rad += nz * 0.1;
+                    } else {
+                        rad += 17.0 * 0.1 + (nz - 17.0) * 0.05;
+                    }
                     
-                    let intensityColor = clamp(f32(nzeros) / 100.0, 0.05, 1.0);
-                    let col = vec3<f32>(intensityColor, intensityColor, 0.0);
+                    var d: f32 = 0.0;
+                    if (u.params2.z > 0.5) {
+                        // Voxel Box
+                        d = sdBox(p - offset, vec3<f32>(rad * 0.8));
+                    } else {
+                        // Smooth Sphere
+                        d = sdSphere(p - offset, rad);
+                    }
+                    
+                    var col = vec3<f32>(0.0);
+                    if (nz <= 17.0) {
+                        let intensityColor = clamp(nz / 17.0, 0.05, 1.0);
+                        col = vec3<f32>(intensityColor, intensityColor, 0.0);
+                    } else {
+                        let hue = mix(0.0, 0.4, clamp((nz - 17.0) / 10.0, 0.0, 1.0));
+                        col = hsv2rgb(vec3<f32>(hue, 1.0, 1.0));
+                    }
 
                     return MapRes(d, col, 0.0);
                 }
 
                 fn map(pos: vec3<f32>) -> MapRes {
                     var base = getGeometry(pos);
+                    
+                    // Grid Mode
+                    if (u.params2.w > 0.5) {
+                        let floorDist = pos.y + 8.0;
+                        if (floorDist < base.dist) {
+                            let gw = abs(fract(pos.x) - 0.5);
+                            let gz = abs(fract(pos.z) - 0.5);
+                            let gridLine = min(gw, gz);
+                            let gridPulse = sin(u.params.x * 5.0 - length(pos.xz) * 0.5) * 0.5 + 0.5;
+                            let lineCol = mix(vec3<f32>(0.0, 0.5, 0.0), vec3<f32>(0.0, 1.0, 0.2), gridPulse);
+                            let gridCol = mix(lineCol, vec3<f32>(0.0, 0.05, 0.0), smoothstep(0.01, 0.03, gridLine));
+                            base = MapRes(floorDist, gridCol, 0.0);
+                        } else {
+                            // Wireframe on objects
+                            let gp = pos * 2.0;
+                            let gw = abs(fract(gp.x) - 0.5);
+                            let gh = abs(fract(gp.y) - 0.5);
+                            let gz = abs(fract(gp.z) - 0.5);
+                            if (min(min(gw, gh), gz) < 0.02) {
+                                base.color = mix(base.color, vec3<f32>(0.0, 1.0, 0.0), 0.5);
+                            }
+                        }
+                    }
+
                     let c = 6.0;
                     let centerCell = floor((pos + vec3<f32>(c*0.5)) / c);
                     
@@ -297,10 +353,10 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
 
                     // Thermal Diaphragm
                     if (u.params2.x > 0.5) {
-                        let lum = dot(finalColor, vec3<f32>(0.299, 0.587, 0.114));
-                        let intensityLevel = u.params2.y;
-                        let thermalRed = mix(vec3<f32>(0.0, 0.0, 0.5), vec3<f32>(1.0, 0.0, 0.0), clamp(lum * 2.0 * intensityLevel, 0.0, 1.0));
-                        let thermalFinal = mix(thermalRed, vec3<f32>(1.0, 1.0, 0.0), clamp((lum * 2.0 - 1.0) * intensityLevel, 0.0, 1.0));
+                        let lum = dot(finalColor, vec3<f32>(0.299, 0.587, 0.114)) * intensityLevel * 2.0;
+                        let thermalRed = mix(vec3<f32>(0.0, 0.0, 0.5), vec3<f32>(1.0, 0.0, 0.0), clamp(lum * 2.0, 0.0, 1.0));
+                        let thermalFinal = mix(thermalRed, vec3<f32>(1.0, 1.0, 0.0), clamp(lum * 2.0 - 1.0, 0.0, 1.0));
+                        thermalFinal = mix(thermalFinal, vec3<f32>(1.0, 1.0, 1.0), clamp(lum * 2.0 - 2.0, 0.0, 1.0));
                         
                         let distFromCenter = length(uv);
                         let vignette = smoothstep(1.5, 0.3 * intensityLevel, distFromCenter);
@@ -700,7 +756,7 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                             }
                         }
 
-                        if (batchMaxZeros >= 18) {
+                        if (batchMaxZeros >= 15) {
                             const hashHex = Array.from(batchBestHashData).map(w => w.toString(16).padStart(8, '0')).join('');
                             genesisHeader[19] = batchBestNonce;
                             const headerHex = Array.from(genesisHeader).map(w => w.toString(16).padStart(8, '0')).join('');
@@ -716,20 +772,6 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                             if (batchMaxZeros > maxZerosRecordRef.current) {
                                 maxZerosRecordRef.current = batchMaxZeros;
                                 pauseUntilRef.current = performance.now() + 2000; // 2s pause
-                                
-                                // Auto CSV Export
-                                const hexZerosCount = Math.floor(batchMaxZeros / 4);
-                                const csvContent = "data:text/csv;charset=utf-8," 
-                                    + "Timestamp,Nonce,BinaryZeros,HexZeros,Hash,Header\n"
-                                    + `${new Date().toISOString()},${batchBestNonce},${batchMaxZeros},${hexZerosCount},0x${hashHex},${headerHex}\n`;
-                                
-                                const encodedUri = encodeURI(csvContent);
-                                const link = document.createElement("a");
-                                link.setAttribute("href", encodedUri);
-                                link.setAttribute("download", `singularity_block_H${hexZerosCount}_B${batchMaxZeros}.csv`);
-                                document.body.appendChild(link);
-                                link.click();
-                                document.body.removeChild(link);
                             }
 
                             setDiscoveries(prev => {
@@ -852,7 +894,7 @@ Vel.Y: ${velocityY.toFixed(4)}
                     camRight[0], camRight[1], camRight[2], 0,
                     camUp[0], camUp[1], camUp[2], 0,
                     appTimeRef.current * 0.001, canvas.width, canvas.height, noiseIntensityRef.current,
-                    diaphragmOnRef.current ? 1.0 : 0.0, diaphragmIntensityRef.current, 0, 0
+                    diaphragmOnRef.current ? 1.0 : 0.0, diaphragmIntensityRef.current, voxelModeRef.current ? 1.0 : 0.0, gridModeRef.current ? 1.0 : 0.0
                 ]);
                 device.queue.writeBuffer(uniformBuffer, 0, uniforms);
 
@@ -894,17 +936,21 @@ Vel.Y: ${velocityY.toFixed(4)}
                                 
                                 let yellowScore = 0;
                                 const thresh = sensorThresholdRef.current;
-                                
+                                let maxVal = 0;
+
                                 for (let i = 0; i < data.length; i += 4) {
                                     let r = data[i];
                                     let g = data[i+1];
                                     let b = data[i+2];
+
+                                    if (r > maxVal) maxVal = r;
                                     
-                                    if (r > thresh && g > thresh && b < 150) {
+                                    if (r > thresh && g > thresh * 0.5 && b < r * 0.8) {
                                         yellowScore += (r + g) / 2;
                                     }
                                 }
                                 
+                                // Если канвас пустой (maxVal === 0), датчик покажет 0.
                                 let currentScore = yellowScore / (scanW * scanH);
                                 
                                 if (thermalNormRef.current === 0) {
@@ -1152,6 +1198,33 @@ Vel.Y: ${velocityY.toFixed(4)}
                                     />
                                 </div>
 
+                                <div className="flex flex-col gap-1 w-full mt-1">
+                                    <label className="flex items-center gap-2 text-[#00FF41] text-[9px] font-mono uppercase cursor-pointer">
+                                        <input 
+                                            type="checkbox" 
+                                            checked={voxelMode}
+                                            onChange={e => {
+                                                setVoxelMode(e.target.checked);
+                                                voxelModeRef.current = e.target.checked;
+                                            }}
+                                            className="appearance-none w-3 h-3 border border-[#00FF41] checked:bg-[#00FF41]"
+                                        />
+                                        Воксельные Полигоны
+                                    </label>
+                                    <label className="flex items-center gap-2 text-[#00FF41] text-[9px] font-mono uppercase cursor-pointer">
+                                        <input 
+                                            type="checkbox" 
+                                            checked={gridMode}
+                                            onChange={e => {
+                                                setGridMode(e.target.checked);
+                                                gridModeRef.current = e.target.checked;
+                                            }}
+                                            className="appearance-none w-3 h-3 border border-[#00FF41] checked:bg-[#00FF41]"
+                                        />
+                                        Бесконечная Сетка
+                                    </label>
+                                </div>
+
                                 <button 
                                     onClick={() => {
                                         setPointerLockDisabled(!pointerLockDisabled);
@@ -1176,7 +1249,7 @@ Vel.Y: ${velocityY.toFixed(4)}
                             isLogOpen ? 'text-[#00FF41]' : 'text-white/50 hover:text-white'
                         }`}
                     >
-                        {isLogOpen ? '[-] ЖУРНАЛ СИНГУЛЯРНОСТЕЙ (18+ b0)' : '[+] ЖУРНАЛ СИНГУЛЯРНОСТЕЙ'}
+                        {isLogOpen ? '[-] ЖУРНАЛ СИНГУЛЯРНОСТЕЙ (15+ b0)' : '[+] ЖУРНАЛ СИНГУЛЯРНОСТЕЙ'}
                     </button>
                     <AnimatePresence>
                         {isLogOpen && (
@@ -1281,6 +1354,25 @@ Vel.Y: ${velocityY.toFixed(4)}
                         </motion.div>
                     )}
                     </AnimatePresence>
+                    
+                    <button 
+                        onClick={() => {
+                            let csvContent = "data:text/csv;charset=utf-8,Timestamp,Nonce,BinaryZeros,Hash,Header\n";
+                            [...topDiscoveries, ...discoveries].forEach(d => {
+                                csvContent += `${new Date().toISOString()},${d.nonce},${d.zeros},0x${d.hash},${d.header}\n`;
+                            });
+                            const encodedUri = encodeURI(csvContent);
+                            const link = document.createElement("a");
+                            link.setAttribute("href", encodedUri);
+                            link.setAttribute("download", `singularity_journal.csv`);
+                            document.body.appendChild(link);
+                            link.click();
+                            document.body.removeChild(link);
+                        }}
+                        className="text-[9px] w-full text-center font-mono uppercase transition-colors border border-[#00FF41]/30 text-[#00FF41] hover:bg-[#00FF41]/10 py-1 mt-1"
+                    >
+                        ЭКСПОРТ ЖУРНАЛА (CSV)
+                    </button>
                 </div>
                 )}
             </div>
