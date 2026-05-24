@@ -3,6 +3,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Activity, Shield, Zap, ChevronLeft, Layout, MousePointer2, Download } from 'lucide-react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { Physics, CuboidCollider, InstancedRigidBodies } from '@react-three/rapier';
+import { RaymarcherBackground } from './RaymarcherBackground';
+import { useMinerStore } from '../store/minerStore';
 
 // Выделяем ~200 МБ оперативной памяти под Глобальную Тень
 const SHADOW_GRAPH_SIZE = 50000000; 
@@ -100,7 +102,7 @@ export function TopologicalOracle() {
     );
 }
 
-const PASS1_WGSL = `
+export const PASS1_WGSL = `
 const K: array<u32, 64> = array<u32, 64>(
     0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u, 0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
     0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u, 0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
@@ -193,7 +195,7 @@ fn pass1_main(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(work
 }
 `;
 
-const PASS2_WGSL = `
+export const PASS2_WGSL = `
 const K: array<u32, 64> = array<u32, 64>(
     0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u, 0x3956c25bu, 0x59f111f1u, 0x923f82a4u, 0xab1c5ed5u,
     0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u, 0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u,
@@ -993,6 +995,54 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                             winnersListRef.current.sort((a, b) => b.zeros - a.zeros);
                             winnersListRef.current = winnersListRef.current.slice(0, 10); // Keep ONLY top 10
 
+                            const minerStore = useMinerStore.getState();
+                            
+                            // Synchronize PageRank with Global Store
+                            if (minerStore.lastParentNode) {
+                                minerStore.incrementPageRank(minerStore.lastParentNode.id);
+                            }
+                            
+                            // Build Real Topology (Data Bridge)
+                            const parent = minerStore.lastParentNode;
+                            
+                            // 1. ПОКОЛЕНИЕ (Ось X): Сдвигаемся строго вперед от родителя
+                            let gen = parent ? parent.generation + 1 : 0;
+                            let posX = parent ? parent.posX + 5.0 : 0;
+                            
+                            // 2. ВЕКТОР (Ось Y): Вычисляем разницу между масками (XOR)
+                            let currentMask = mlStateRef.current.viralMask;
+                            let shiftY = 0;
+                            if (parent) {
+                                let maskDelta = (currentMask ^ parent.mask) >>> 0; 
+                                shiftY = (maskDelta % 100) / 10.0; 
+                            }
+                            let direction = (mut % 2 === 0) ? 1 : -1;
+                            let posY = parent ? parent.posY + (shiftY * direction) : 0;
+                            
+                            // 3. ГЛУБИНА (Ось Z): Жесткая привязка к этажу
+                            let posZ = -zeros * 10;
+                            
+                            const newNode = {
+                                id: Date.now() + Math.random(),
+                                parentId: parent ? parent.id : null,
+                                minNonce: mut - 5000,
+                                maxNonce: mut + 5000,
+                                weight: 1,
+                                mask: currentMask,
+                                maxFloor: zeros,
+                                posX,
+                                posY,
+                                posZ,
+                                parentPosX: parent ? parent.posX : undefined,
+                                parentPosY: parent ? parent.posY : undefined,
+                                parentPosZ: parent ? parent.posZ : undefined,
+                                parentMaxFloor: parent ? parent.maxFloor : undefined,
+                                generation: gen
+                            };
+                            
+                            minerStore.addNode(newNode);
+                            minerStore.setLastParentNode(newNode);
+
                             addLog(`[БЛОК] Выпал блок с ${zeros} нулями! Hash Start: ${h0.toString(16).padStart(8, '0')}`, 'spam');
                         }
                     }
@@ -1284,7 +1334,7 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
 
     return (
         <div className="fixed inset-0 z-50 bg-[#050505] text-[#00FF41] font-mono flex flex-col overflow-y-auto">
-            <TopologicalOracle />
+            <RaymarcherBackground winnersList={winnersList} />
             {/* Header */}
             <header className="fixed top-0 left-0 right-0 p-3 md:p-4 flex justify-between items-start md:items-center z-20 border-b border-[#00FF41]/30 bg-black/80 backdrop-blur-md">
                 <div className="flex items-center gap-2 md:gap-4 flex-1">

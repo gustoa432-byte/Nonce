@@ -2,31 +2,20 @@ import React, { useMemo, useRef, useEffect } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import * as THREE from 'three';
-
-export type MemoryNode = {
-    minNonce: number;
-    maxNonce: number;
-    weight: number;
-    mask: number;
-    maxFloor: number;
-};
-
-export type FRACTAL_QUOTAS = {
-    L1_BASE: { minFloor: number, maxFloor: number, limit: number, nodes: MemoryNode[] };
-    L2_MID: { minFloor: number, maxFloor: number, limit: number, nodes: MemoryNode[] };
-    L3_DEEP: { minFloor: number, maxFloor: number, limit: number, nodes: MemoryNode[] };
-    L4_SINGULARITY: { minFloor: number, maxFloor: number, limit: number, nodes: MemoryNode[] };
-};
+import { useMinerStore, MemoryNode, FRACTAL_QUOTAS } from '../store/minerStore';
 
 type OrbitalMapProps = {
-    memoryBrain: React.RefObject<FRACTAL_QUOTAS>;
-    onTargetNode: (nonce: number) => void;
+    onTargetNode?: (nonce: number) => void;
 };
 
-const InstancedNodes = ({ memoryBrain, onTargetNode }: OrbitalMapProps) => {
+const InstancedNodes = ({ onTargetNode }: OrbitalMapProps) => {
     const meshRef = useRef<THREE.InstancedMesh>(null);
     const linesRef = useRef<THREE.LineSegments>(null);
     const nodesRef = useRef<MemoryNode[]>([]);
+    
+    // Instead of taking memoryBrain as prop, read from store
+    const { quotas } = useMinerStore();
+    const memoryBrainData = quotas;
     const { camera } = useThree();
 
     useEffect(() => {
@@ -34,15 +23,18 @@ const InstancedNodes = ({ memoryBrain, onTargetNode }: OrbitalMapProps) => {
         camera.lookAt(0, 0, 0);
     }, [camera]);
 
+    const lastUpdateCountRef = useRef(-1);
+
     useFrame(() => {
-        if (!meshRef.current || !memoryBrain.current) return;
+        if (!meshRef.current || !memoryBrainData) return;
+        if (memoryBrainData.updateCount === lastUpdateCountRef.current) return;
+        lastUpdateCountRef.current = memoryBrainData.updateCount;
         
-        const quotas = memoryBrain.current;
         const allNodes = [
-            ...quotas.L1_BASE.nodes,
-            ...quotas.L2_MID.nodes,
-            ...quotas.L3_DEEP.nodes,
-            ...quotas.L4_SINGULARITY.nodes
+            ...memoryBrainData.L1_BASE.nodes,
+            ...memoryBrainData.L2_MID.nodes,
+            ...memoryBrainData.L3_DEEP.nodes,
+            ...memoryBrainData.L4_SINGULARITY.nodes
         ];
 
         nodesRef.current = allNodes;
@@ -58,15 +50,13 @@ const InstancedNodes = ({ memoryBrain, onTargetNode }: OrbitalMapProps) => {
         for (let i = 0; i < count; i++) {
             const node = allNodes[i];
             
-            // Координаты X/Y на основе нонса и маски (нормализованные)
-            let posX = (node.minNonce % 100000) / 100 - 500; 
-            let posY = (node.mask % 2000) - 1000; 
-            
-            // Ось Z - это глубина погружения (Floor)
-            let posZ = -node.maxFloor * 20; 
+            // Жесткие Абсолютные Координаты
+            let posX = node.posX;
+            let posY = node.posY;
+            let posZ = node.posZ;
             
             // Размер сферы - это вес
-            let scale = Math.log(node.weight + 2) * 10; 
+            let scale = Math.log(node.weight + 2) * 2; 
             
             dummy.position.set(posX, posY, posZ);
             dummy.scale.set(scale, scale, scale);
@@ -89,20 +79,21 @@ const InstancedNodes = ({ memoryBrain, onTargetNode }: OrbitalMapProps) => {
             color.setRGB(r, g, b);
             meshRef.current.setColorAt(i, color);
 
-            // Create connections to previous node to form a fractal strand
-            if (i > 0) {
-                const prevNode = allNodes[i - 1];
-                let px = (prevNode.minNonce % 100000) / 100 - 500;
-                let py = (prevNode.mask % 2000) - 1000;
-                let pz = -prevNode.maxFloor * 20;
+            // Create connections to parent node to form a fractal strand
+            // (Only if parent position is available)
+            if (node.parentPosX !== undefined && node.parentPosY !== undefined && node.parentPosZ !== undefined) {
+                let px = node.parentPosX;
+                let py = node.parentPosY;
+                let pz = node.parentPosZ;
                 
                 // Add start and end points for the line
                 positions.push(px, py, pz, posX, posY, posZ);
                 
                 let pr = 0, pg = 0, pb = 0;
-                if (prevNode.maxFloor <= 18) {
-                    pg = Math.max(0.3, prevNode.maxFloor / 18.0);
-                } else if (prevNode.maxFloor <= 30) {
+                let parentMaxFloor = node.parentMaxFloor || 0;
+                if (parentMaxFloor <= 18) {
+                    pg = Math.max(0.3, parentMaxFloor / 18.0);
+                } else if (parentMaxFloor <= 30) {
                     pr = 1.0; pg = 1.0;
                 } else {
                     pr = 1.0;

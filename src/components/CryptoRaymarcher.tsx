@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { X, Copy, ChevronUp, ChevronDown, Trophy } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { useMinerStore } from '../store/minerStore';
 
 type CryptoRaymarcherProps = {
     onClose: () => void;
 };
 
-import { OrbitalMap, FRACTAL_QUOTAS } from './OrbitalMap';
+import { OrbitalMap } from './OrbitalMap';
 
 export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -19,12 +20,7 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
     const showOrbitalMapRef = useRef(false);
     const forceJumpNonceRef = useRef<number | null>(null);
 
-    const memoryBrainRef = useRef<FRACTAL_QUOTAS>({
-        L1_BASE: { minFloor: 1, maxFloor: 10, limit: 128, nodes: [] },
-        L2_MID: { minFloor: 11, maxFloor: 25, limit: 64, nodes: [] },
-        L3_DEEP: { minFloor: 26, maxFloor: 40, limit: 32, nodes: [] },
-        L4_SINGULARITY: { minFloor: 41, maxFloor: 999999, limit: 32, nodes: [] }
-    });
+    const parentNodeRef = useRef<{id: number, mask: number, generation: number, posX: number, posY: number, posZ: number, maxFloor: number} | null>(null);
 
     const [discoveries, setDiscoveries] = useState<{nonce: number, hash: string, zeros: number, id: number, header: string}[]>([]);
     const [topDiscoveries, setTopDiscoveries] = useState<{nonce: number, hash: string, zeros: number, id: number, header: string}[]>([]);
@@ -845,130 +841,30 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                 lastPhysicsTime = now;
                 appTimeRef.current += dt * timeScaleRef.current;
 
-                if (mutatingRef.current) {
-                    if (now >= pauseUntilRef.current) {
-                        let batchMaxZeros = 0;
-                        let batchBestNonce = 0;
-                        let batchBestHashData = new Uint32Array(8);
+                const { winners, quotas } = useMinerStore.getState();
 
-                        // Inject Camera coordinates into header entropy
-                        const camXBits = new Float32Array([posX])[0];
-                        const camZBits = new Float32Array([posZ])[0];
-                        const camFwdBits = new Float32Array([camForward[0]])[0];
-                        genesisHeader[14] = new Uint32Array(new Float32Array([camXBits]).buffer)[0];
-                        genesisHeader[15] = new Uint32Array(new Float32Array([camZBits]).buffer)[0];
-                        genesisHeader[16] = new Uint32Array(new Float32Array([camFwdBits]).buffer)[0];
+                // Sync gpuVoxels from winners
+                const voxels = new Float32Array(64 * 4);
+                winners.slice(0, 64).forEach((w, i) => {
+                    voxels[i*4 + 0] = (w.mutant % 20) - 10;
+                    voxels[i*4 + 1] = (w.hash0 % 20) - 10;
+                    voxels[i*4 + 2] = (w.hash1 % 20) - 10;
+                    voxels[i*4 + 3] = w.zeros > 10 ? 1 : 0;
+                });
+                device.queue.writeBuffer(gpuVoxelsBuffer, 0, voxels);
 
-                        const cryptoRand = new Uint32Array(2);
-                        window.crypto.getRandomValues(cryptoRand);
-                        genesisHeader[17] = cryptoRand[0];
-                        genesisHeader[18] = cryptoRand[1];
-
-                        // ФРАКТАЛЬНАЯ НАВИГАЦИЯ (МОЗГИ РОЯ)
-                        let navigated = false;
-                        
-                        if (forceJumpNonceRef.current !== null) {
-                            nonce = forceJumpNonceRef.current;
-                            forceJumpNonceRef.current = null;
-                            navigated = true;
-                        } else if (Math.random() < 0.3) {
-                            const mb = memoryBrainRef.current;
-                            const levels = [mb.L1_BASE, mb.L2_MID, mb.L3_DEEP, mb.L4_SINGULARITY];
-                            for (let level of levels) {
-                                if (level.nodes.length > 0) {
-                                    // Прыжок в самую перспективную зону
-                                    let bestNode = level.nodes[Math.floor(Math.random() * level.nodes.length)];
-                                    nonce = bestNode.maxNonce + 1000;
-                                    navigated = true;
-                                    break;
-                                }
-                            }
-                        }
-
-                        const AVALANCHE = 32768; // Boost to 800k H/s
-                        for (let i = 0; i < AVALANCHE; i++) {
-                            nonce = (nonce + 1) >>> 0;
-                            genesisHeader[19] = nonce;
-                            
-                            const s1 = hasher.hash80(genesisHeader, out1);
-                            if (!s1) {
-                                genesisHeader[1] = (genesisHeader[1] + 1) >>> 0;
-                                continue;
-                            }
-                            const s2 = hasher.hash32(out1, out2);
-                            if (!s2) continue;
-                            
-                            let zeros = Math.clz32(out2[0]);
-                            if (zeros === 32) zeros += Math.clz32(out2[1]);
-                            
-                            cpuEntropy[i % 1024] = zeros;
-                            
-                            if (zeros > batchMaxZeros) {
-                                batchMaxZeros = zeros;
-                                batchBestNonce = nonce;
-                                batchBestHashData.set(out2);
-                            }
-                        }
-
-                        hashrateAccumulator += AVALANCHE;
-
-                        device.queue.writeBuffer(entropyBuffer, 0, cpuEntropy);
-
-                        // ЧЕКПОИНТ В ПАМЯТЬ
-                        if (batchMaxZeros >= 14) {
-                            const mb = memoryBrainRef.current;
-                            if (batchMaxZeros <= mb.L1_BASE.maxFloor) {
-                                mb.L1_BASE.nodes.push({minNonce: batchBestNonce - 5000, maxNonce: batchBestNonce, weight: 1, mask: batchBestHashData[0], maxFloor: batchMaxZeros});
-                                if (mb.L1_BASE.nodes.length > mb.L1_BASE.limit) mb.L1_BASE.nodes.shift();
-                            } else if (batchMaxZeros <= mb.L2_MID.maxFloor) {
-                                mb.L2_MID.nodes.push({minNonce: batchBestNonce - 5000, maxNonce: batchBestNonce, weight: 2, mask: batchBestHashData[0], maxFloor: batchMaxZeros});
-                                if (mb.L2_MID.nodes.length > mb.L2_MID.limit) mb.L2_MID.nodes.shift();
-                            } else {
-                                mb.L3_DEEP.nodes.push({minNonce: batchBestNonce - 5000, maxNonce: batchBestNonce, weight: 3, mask: batchBestHashData[0], maxFloor: batchMaxZeros});
-                                if (mb.L3_DEEP.nodes.length > mb.L3_DEEP.limit) mb.L3_DEEP.nodes.shift();
-                            }
-                        }
-
-                        if (batchMaxZeros >= 15) {
-                            const hashHex = Array.from(batchBestHashData).map(w => w.toString(16).padStart(8, '0')).join('');
-                            genesisHeader[19] = batchBestNonce;
-                            const headerHex = Array.from(genesisHeader).map(w => w.toString(16).padStart(8, '0')).join('');
-                            
-                            const newDisc = { 
-                                nonce: batchBestNonce, 
-                                hash: hashHex, 
-                                zeros: batchMaxZeros, 
-                                header: headerHex,
-                                id: Date.now() + Math.random() 
-                            };
-
-                            if (batchMaxZeros > maxZerosRecordRef.current) {
-                                maxZerosRecordRef.current = batchMaxZeros;
-                                pauseUntilRef.current = performance.now() + 2000; // 2s pause
-                            }
-
-                            setDiscoveries(prev => {
-                            const newArr = [...prev, newDisc];
-                            return newArr.slice(-50);
-                        });
-
-                        setTopDiscoveries(prev => {
-                            const newTop = [...prev, newDisc];
-                            newTop.sort((a, b) => b.zeros - a.zeros);
-                            
-                            // Remove lowest hash value clones if they are the exact same? 
-                            // Using a simple top 3 slice and simple deduplication
-                            const uniqueTop = newTop.filter((item, index, self) =>
-                                index === self.findIndex((t) => (
-                                    t.hash === item.hash
-                                ))
-                            );
-                            
-                            return uniqueTop.slice(0, 3);
-                        });
-                        }
+                // Sync cpuEntropy
+                const cpuEntropy = new Uint32Array(1024);
+                let idx = 0;
+                for (let level of [quotas.L1_BASE, quotas.L2_MID, quotas.L3_DEEP, quotas.L4_SINGULARITY]) {
+                    for (let node of level.nodes) {
+                        if (idx >= 1024) break;
+                        cpuEntropy[idx++] = node.maxFloor;
                     }
+                    if (idx >= 1024) break;
                 }
+                while(idx < 1024) { cpuEntropy[idx++] = Math.floor(Math.random() * 5); }
+                device.queue.writeBuffer(entropyBuffer, 0, cpuEntropy);
 
                 // Update sizes
                 canvas.width = window.innerWidth;
@@ -1199,7 +1095,6 @@ Vel.Y: ${velocityY.toFixed(4)}
         <div className="fixed inset-0 z-50 bg-black overflow-hidden select-none touch-none">
             {showOrbitalMap && (
                 <OrbitalMap 
-                    memoryBrain={memoryBrainRef} 
                     onTargetNode={(nonce) => {
                         forceJumpNonceRef.current = nonce;
                         setShowOrbitalMap(false);
