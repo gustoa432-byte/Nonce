@@ -129,15 +129,22 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                     params2: vec4<f32>,
                 };
 
+                struct EntropyBuffer {
+                    data: array<u32>,
+                };
+                struct VoxelsBuffer {
+                    data: array<vec4<f32>>,
+                };
+
                 @group(0) @binding(0) var<uniform> u: Uniforms;
-                @group(0) @binding(1) var<storage, read> entropyBuffer: array<u32>;
-                @group(0) @binding(2) var<storage, read> voxelsBuffer: array<vec4<f32>>;
+                @group(0) @binding(1) var<storage, read> entropyBuffer: EntropyBuffer;
+                @group(0) @binding(2) var<storage, read> voxelsBuffer: VoxelsBuffer;
 
                 struct MapRes {
                     dist: f32,
                     color: vec3<f32>,
                     mat: f32 // 0 = default, 1 = singularity
-                }
+                };
 
                 fn sdSphere(p: vec3<f32>, r: f32) -> f32 {
                     return length(p) - r;
@@ -194,7 +201,7 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
 
                     let idx = u32(abs(cell.x + cell.y * 32.0 + cell.z * 1024.0)) % 1024u;
                     let seed = hash3(cell);
-                    let nzeros = entropyBuffer[idx];
+                    let nzeros = entropyBuffer.data[idx];
                     let nz = f32(nzeros);
 
                     var offset = vec3<f32>(
@@ -230,7 +237,7 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                     
                     // Voxels for orientation
                     for(var i = 0u; i < 64u; i++) {
-                        let vox = voxelsBuffer[i];
+                        let vox = voxelsBuffer.data[i];
                         if (vox.w > 0.5) {
                             let vd = sdBox(pos - vox.xyz, vec3<f32>(0.48));
                             if (vd < base.dist) {
@@ -281,7 +288,7 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                             for(var kx = -1; kx <= 1; kx++) {
                                 let ncell = centerCell + vec3<f32>(f32(kx), f32(ky), f32(kz));
                                 let idx = u32(abs(ncell.x + ncell.y * 32.0 + ncell.z * 1024.0)) % 1024u;
-                                let nzeros = entropyBuffer[idx];
+                                let nzeros = entropyBuffer.data[idx];
                                 
                                 if (nzeros >= 18u) {
                                     let np = pos - ncell * c;
