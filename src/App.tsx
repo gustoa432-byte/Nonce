@@ -7,7 +7,7 @@ export default function App() {
   const [mode, setMode] = useState<string | null>(null);
 
   if (mode === 'two-pass') return <TwoPassMiner onClose={() => setMode(null)} />;
-  if (mode === 'raymarcher') return <CryptoRaymarcher onClose={() => setMode(null)} discoveries={[]} setDiscoveries={()=>{}} topDiscoveries={[]} setTopDiscoveries={()=>{}} />;
+  if (mode === 'raymarcher') return <CryptoRaymarcher onClose={() => setMode(null)} />;
   if (mode === 'grinder') return <TriangleGrinder onClose={() => setMode(null)} />;
 
   return (

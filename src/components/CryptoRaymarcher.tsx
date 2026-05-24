@@ -4,18 +4,17 @@ import { motion, AnimatePresence } from 'motion/react';
 
 type CryptoRaymarcherProps = {
     onClose: () => void;
-    discoveries: {nonce: number, hash: string, zeros: number, id: number, header: string}[];
-    setDiscoveries: React.Dispatch<React.SetStateAction<{nonce: number, hash: string, zeros: number, id: number, header: string}[]>>;
-    topDiscoveries: {nonce: number, hash: string, zeros: number, id: number, header: string}[];
-    setTopDiscoveries: React.Dispatch<React.SetStateAction<{nonce: number, hash: string, zeros: number, id: number, header: string}[]>>;
 };
 
-export function CryptoRaymarcher({ onClose, discoveries, setDiscoveries, topDiscoveries, setTopDiscoveries }: CryptoRaymarcherProps) {
+export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const mutatingRef = useRef(false);
     const [isLocked, setIsLocked] = useState(false);
     const [isMutatingUi, setIsMutatingUi] = useState(false);
     const [isLogOpen, setIsLogOpen] = useState(true);
+
+    const [discoveries, setDiscoveries] = useState<{nonce: number, hash: string, zeros: number, id: number, header: string}[]>([]);
+    const [topDiscoveries, setTopDiscoveries] = useState<{nonce: number, hash: string, zeros: number, id: number, header: string}[]>([]);
     const [isLeaderboardOpen, setIsLeaderboardOpen] = useState(true);
     const [isControlsOpen, setIsControlsOpen] = useState(true);
     const [isGuideOpen, setIsGuideOpen] = useState(true);
@@ -48,8 +47,8 @@ export function CryptoRaymarcher({ onClose, discoveries, setDiscoveries, topDisc
     const [thermalStats, setThermalStats] = useState({ current: 0, norm: 0, deviation: 0 });
     const thermalNormRef = useRef(0);
     const thermalSamplesRef = useRef<number[]>([]);
-    const [sensorThresholdUI, setSensorThresholdUI] = useState(200);
-    const sensorThresholdRef = useRef(200);
+    const [sensorThresholdUI, setSensorThresholdUI] = useState(150);
+    const sensorThresholdRef = useRef(150);
     const [isSensorOpen, setIsSensorOpen] = useState(true);
 
     const [diaphragmOn, setDiaphragmOn] = useState(false);
@@ -103,9 +102,11 @@ export function CryptoRaymarcher({ onClose, discoveries, setDiscoveries, topDisc
             const format = (navigator as any).gpu.getPreferredCanvasFormat();
             
             const context = canvas.getContext('webgpu') as any;
+            const GPUTextureUsage = (window as any).GPUTextureUsage;
             context.configure({
                 device,
                 format,
+                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
                 alphaMode: 'opaque'
             });
 
@@ -899,7 +900,7 @@ Vel.Y: ${velocityY.toFixed(4)}
                                     let g = data[i+1];
                                     let b = data[i+2];
                                     
-                                    if (r > thresh && g > thresh && b < 100) {
+                                    if (r > thresh && g > thresh && b < 150) {
                                         yellowScore += (r + g) / 2;
                                     }
                                 }
