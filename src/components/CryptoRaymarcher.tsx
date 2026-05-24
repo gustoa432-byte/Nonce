@@ -129,17 +129,9 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                     params2: vec4<f32>,
                 };
 
-                struct EntropyBuffer {
-                    data: array<u32>,
-                };
-
-                struct VoxelsBuffer {
-                    data: array<vec4<f32>>,
-                };
-
                 @group(0) @binding(0) var<uniform> u: Uniforms;
-                @group(0) @binding(1) var<storage, read> entropyBuffer: EntropyBuffer;
-                @group(0) @binding(2) var<storage, read> voxelsBuffer: VoxelsBuffer;
+                @group(0) @binding(1) var<storage, read> entropyBuffer: array<u32>;
+                @group(0) @binding(2) var<storage, read> voxelsBuffer: array<vec4<f32>>;
 
                 struct MapRes {
                     dist: f32,
@@ -202,7 +194,7 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
 
                     let idx = u32(abs(cell.x + cell.y * 32.0 + cell.z * 1024.0)) % 1024u;
                     let seed = hash3(cell);
-                    let nzeros = entropyBuffer.data[idx];
+                    let nzeros = entropyBuffer[idx];
                     let nz = f32(nzeros);
 
                     var offset = vec3<f32>(
@@ -222,8 +214,8 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                     
                     var col = vec3<f32>(0.0);
                     if (nz <= 17.0) {
-                        let intensityColor = clamp(nz / 17.0, 0.05, 1.0);
-                        col = vec3<f32>(intensityColor, intensityColor, 0.0);
+                        let intensityColor = clamp(nz / 17.0, 0.0, 1.0) * 0.8 + 0.2;
+                        col = vec3<f32>(intensityColor * 0.2, intensityColor, intensityColor * 0.5);
                     } else {
                         // 0.16 is Yellow, 0.5 is Cyan (middle of rainbow)
                         let hue = mix(0.16, 0.5, clamp((nz - 17.0) / 10.0, 0.0, 1.0));
@@ -238,7 +230,7 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                     
                     // Voxels for orientation
                     for(var i = 0u; i < 64u; i++) {
-                        let vox = voxelsBuffer.data[i];
+                        let vox = voxelsBuffer[i];
                         if (vox.w > 0.5) {
                             let vd = sdBox(pos - vox.xyz, vec3<f32>(0.48));
                             if (vd < base.dist) {
@@ -289,7 +281,7 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                             for(var kx = -1; kx <= 1; kx++) {
                                 let ncell = centerCell + vec3<f32>(f32(kx), f32(ky), f32(kz));
                                 let idx = u32(abs(ncell.x + ncell.y * 32.0 + ncell.z * 1024.0)) % 1024u;
-                                let nzeros = entropyBuffer.data[idx];
+                                let nzeros = entropyBuffer[idx];
                                 
                                 if (nzeros >= 18u) {
                                     let np = pos - ncell * c;
@@ -393,17 +385,33 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
             `;
 
             const module = device.createShaderModule({ code: shaderCode });
-
-            const pipeline = device.createRenderPipeline({
-                layout: 'auto',
-                vertex: { module, entryPoint: 'vs' },
-                fragment: {
-                    module,
-                    entryPoint: 'fs',
-                    targets: [{ format }]
-                },
-                primitive: { topology: 'triangle-list' }
+            module.getCompilationInfo().then((info) => {
+                if (info.messages.length > 0) {
+                    console.error('Shader compilation info:', info);
+                    if (coolingTextRef.current) {
+                        coolingTextRef.current.innerHTML = '<div class="text-[#FF3E3E]">SHADER ERROR: ' + info.messages[0].message + '</div>';
+                    }
+                }
             });
+
+            let pipeline: GPURenderPipeline;
+            try {
+                pipeline = device.createRenderPipeline({
+                    layout: 'auto',
+                    vertex: { module, entryPoint: 'vs' },
+                    fragment: {
+                        module,
+                        entryPoint: 'fs',
+                        targets: [{ format }]
+                    },
+                    primitive: { topology: 'triangle-list' }
+                });
+            } catch (e: any) {
+                if (coolingTextRef.current) {
+                    coolingTextRef.current.innerHTML = '<div class="text-[#FF3E3E]">PIPELINE ERROR: ' + e.message + '</div>';
+                }
+                return;
+            }
 
             const GPUBufferUsage = (window as any).GPUBufferUsage;
 
