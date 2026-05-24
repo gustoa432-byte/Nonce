@@ -39,6 +39,11 @@ export function CryptoRaymarcher({ onClose, discoveries, setDiscoveries, topDisc
     const [noiseIntensityUI, setNoiseIntensityUI] = useState(0.0);
     const noiseIntensityRef = useRef(0.0);
 
+    const [movementSpeedUI, setMovementSpeedUI] = useState(0.4);
+    const movementSpeedRef = useRef(0.4);
+
+    const [pointerLockDisabled, setPointerLockDisabled] = useState(false);
+
     const toggleMutations = () => {
         mutatingRef.current = !mutatingRef.current;
         setIsMutatingUi(mutatingRef.current);
@@ -141,31 +146,17 @@ export function CryptoRaymarcher({ onClose, discoveries, setDiscoveries, topDisc
                     let seed = hash3(cell);
                     let nzeros = entropyBuffer[idx];
 
-                    var d = 1000.0;
-                    var col = vec3<f32>(0.0);
-
-                    if (nzeros <= 8u) {
-                        let offset = vec3<f32>(
-                            sin(t*2.0 + f32(seed)), 
-                            cos(t*3.0 + f32(seed)), 
-                            sin(t*1.5 - f32(seed))
-                        ) * 0.5 * (1.0 + intensity);
-                        d = sdSphere(p - offset, 0.6 + intensity * 0.3);
-                        col = mix(vec3<f32>(1.0, 0.2, 0.2), vec3<f32>(1.0, 1.0, 1.0), f32(seed % 10u) / 10.0);
-                    } else if (nzeros <= 12u) {
-                        let a = t * 2.0 + f32(seed) + intensity * 5.0; 
-                        let s = sin(a); let cs = cos(a);
-                        let p_rot = vec3<f32>(cs*p.x + s*p.z, p.y, -s*p.x + cs*p.z);
-                        d = sdTetrahedron(p_rot, 0.9 + intensity * 0.5);
-                        col = vec3<f32>(0.2, 1.0, 0.3);
-                    } else if (nzeros <= 14u) {
-                        d = sdBox(p, vec3<f32>(0.9 + intensity * 0.5));
-                        let isAlt = (seed % 2u) == 0u;
-                        col = select(vec3<f32>(0.8, 1.0, 0.8), vec3<f32>(0.1, 0.8, 0.2), isAlt);
-                    } else {
-                        // Singularity core logic is handled in the 3x3 loop, give base an infinite distance
-                        d = 1000.0;
-                    }
+                    let offset = vec3<f32>(
+                        sin(t*2.0 + f32(seed)), 
+                        cos(t*3.0 + f32(seed)), 
+                        sin(t*1.5 - f32(seed))
+                    ) * 0.5 * (1.0 + intensity);
+                    
+                    let rad = 0.6 + intensity * 0.3 + min(f32(nzeros) * 0.05, 1.5);
+                    let d = sdSphere(p - offset, rad);
+                    
+                    let intensityColor = clamp(f32(nzeros) / 100.0, 0.05, 1.0);
+                    let col = vec3<f32>(intensityColor, intensityColor, 0.0);
 
                     return MapRes(d, col, 0.0);
                 }
@@ -189,7 +180,7 @@ export function CryptoRaymarcher({ onClose, discoveries, setDiscoveries, topDisc
                                     let np = pos - ncell * c;
                                     // Rad grows exponentially with leading zeros
                                     let rad = min(5.5, pow(1.5, f32(nzeros) - 17.0) * 0.25);
-                                    let d = sdTetrahedron(np, rad);
+                                    let d = sdSphere(np, rad);
                                     singDist = min(singDist, d);
                                 }
                             }
@@ -249,8 +240,7 @@ export function CryptoRaymarcher({ onClose, discoveries, setDiscoveries, topDisc
                     }
 
                     let sunDir = normalize(vec3<f32>(0.4, 0.9, -0.3));
-                    let sunShape = smoothstep(0.997, 0.999, dot(rayDir, sunDir));
-                    let fogCol = vec3<f32>(1.0, 1.0, 1.0); // White background
+                    let fogCol = vec3<f32>(0.0, 0.0, 0.0); // Black background
 
                     if (t > 120.0) {
                         return vec4<f32>(fogCol, 1.0);
@@ -568,7 +558,7 @@ export function CryptoRaymarcher({ onClose, discoveries, setDiscoveries, topDisc
                 L1_BASE: { minFloor: 1, maxFloor: 10, limit: 128, nodes: [] as {minNonce: number, maxNonce: number, weight: number}[] },
                 L2_MID: { minFloor: 11, maxFloor: 25, limit: 64, nodes: [] as {minNonce: number, maxNonce: number, weight: number}[] },
                 L3_DEEP: { minFloor: 26, maxFloor: 40, limit: 32, nodes: [] as {minNonce: number, maxNonce: number, weight: number}[] },
-                L4_SINGULARITY: { minFloor: 41, maxFloor: 64, limit: 32, nodes: [] as {minNonce: number, maxNonce: number, weight: number}[] }
+                L4_SINGULARITY: { minFloor: 41, maxFloor: 999999, limit: 32, nodes: [] as {minNonce: number, maxNonce: number, weight: number}[] }
             };
 
             const render = (time: number) => {
@@ -727,7 +717,7 @@ export function CryptoRaymarcher({ onClose, discoveries, setDiscoveries, topDisc
                     velocityY = 0;
                 }
 
-                const speed = 0.4;
+                const speed = movementSpeedRef.current;
                 if (keys.w) { posX += camForward[0]*speed; posY += camForward[1]*speed; posZ += camForward[2]*speed; }
                 if (keys.s) { posX -= camForward[0]*speed; posY -= camForward[1]*speed; posZ -= camForward[2]*speed; }
                 if (keys.a) { posX -= camRight[0]*speed; posY -= camRight[1]*speed; posZ -= camRight[2]*speed; }
@@ -883,11 +873,11 @@ Vel.Y: ${velocityY.toFixed(4)}
                 ref={canvasRef} 
                 className="w-full h-full block cursor-crosshair touch-none"
                 onClick={() => {
-                    if (!isLocked && !isMobile) canvasRef.current?.requestPointerLock();
+                    if (!isLocked && !isMobile && !pointerLockDisabled) canvasRef.current?.requestPointerLock();
                 }}
             />
             
-            {!isLocked && !isMobile && (
+            {!isLocked && !isMobile && !pointerLockDisabled && (
                 <div className="absolute inset-0 flex items-center justify-center pointer-events-none bg-black z-[55]">
                     <div className="text-center font-mono animate-pulse">
                         <div className="text-[#00FF41] text-2xl font-bold mb-4 tracking-[0.2em]">ТЕРМОДИНАМИЧЕСКИЙ ДЕШИФРАТОР SHA-256</div>
@@ -1014,6 +1004,37 @@ Vel.Y: ${velocityY.toFixed(4)}
                                         className="w-full h-0.5 appearance-none bg-white/20 accent-[#00FF41] outline-none cursor-pointer"
                                     />
                                 </div>
+
+                                <div className="flex flex-col gap-1 w-full relative">
+                                    <label className="text-[#00FF41] font-mono text-[9px] uppercase drop-shadow-[0_1px_1px_rgba(0,0,0,1)]">
+                                        Скорость Полета
+                                    </label>
+                                    <input 
+                                        type="number" 
+                                        step="0.1" 
+                                        value={movementSpeedUI} 
+                                        onChange={e => {
+                                            const val = parseFloat(e.target.value);
+                                            if (!isNaN(val)) {
+                                                setMovementSpeedUI(val);
+                                                movementSpeedRef.current = val;
+                                            }
+                                        }}
+                                        className="w-full bg-black/50 border border-[#00FF41]/30 text-[#00FF41] text-[10px] p-1 font-mono outline-none"
+                                    />
+                                </div>
+
+                                <button 
+                                    onClick={() => {
+                                        setPointerLockDisabled(!pointerLockDisabled);
+                                        if (document.pointerLockElement) {
+                                            document.exitPointerLock();
+                                        }
+                                    }}
+                                    className={`text-[9px] text-left font-mono uppercase transition-colors drop-shadow-[0_1px_1px_rgba(0,0,0,1)] border px-1 py-0.5 mt-2 ${pointerLockDisabled ? 'text-black bg-[#FF3E3E] border-[#FF3E3E]' : 'text-[#00FF41] border-[#00FF41]/30 hover:bg-[#00FF41]/10'}`}
+                                >
+                                    {pointerLockDisabled ? 'МЫШЬ ОСВОБОЖДЕНА (ПК)' : 'ОСВОБОДИТЬ МЫШЬ (ПК)'}
+                                </button>
                             </motion.div>
                         )}
                     </AnimatePresence>
@@ -1162,9 +1183,9 @@ Vel.Y: ${velocityY.toFixed(4)}
 
             <button 
                 onClick={onClose}
-                className="absolute top-2 right-2 text-white/30 hover:text-[#00FF41] transition-colors pointer-events-auto z-[60] drop-shadow-[0_1px_2px_rgba(0,0,0,1)]"
+                className="absolute top-2 right-2 flex items-center gap-2 bg-black/60 p-2 px-3 text-[#FF3E3E] hover:text-white hover:bg-[#FF3E3E] transition-all pointer-events-auto z-[99] border border-[#FF3E3E]/50 rounded-md cursor-pointer font-mono text-xs font-bold uppercase"
             >
-                <X className="w-5 h-5" />
+                <X className="w-4 h-4" /> ВЫХОД ИЗ МАТРИЦЫ
             </button>
         </div>
     );
