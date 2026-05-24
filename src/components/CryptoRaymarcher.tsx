@@ -19,6 +19,7 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
     const [isControlsOpen, setIsControlsOpen] = useState(true);
     const [isGuideOpen, setIsGuideOpen] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [gpuError, setGpuError] = useState<string | null>(null);
 
     const [isMeasuring, setIsMeasuring] = useState(false);
     const isMeasuringRef = useRef(false);
@@ -107,6 +108,12 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
             }
 
             const device = await adapter.requestDevice();
+            
+            device.addEventListener('uncapturederror', (event: any) => {
+                console.error('A WebGPU error was not captured:', event.error.message);
+                setGpuError('WEBGPU ERROR: ' + (event.error.message || event.error));
+            });
+
             const format = (navigator as any).gpu.getPreferredCanvasFormat();
             
             const context = canvas.getContext('webgpu') as any;
@@ -262,8 +269,8 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                             let gz = abs(fract(pos.z) - 0.5);
                             let gridLine = min(gw, gz);
                             let gridPulse = sin(u.params.x * 5.0 - length(pos.xz) * 0.5) * 0.5 + 0.5;
-                            let lineCol = mix(vec3<f32>(0.0, 0.5, 0.0), vec3<f32>(0.0, 1.0, 0.2), gridPulse);
-                            let gridCol = mix(lineCol, vec3<f32>(0.0, 0.05, 0.0), smoothstep(0.01, 0.03, gridLine));
+                            let lineCol = mix(vec3<f32>(0.0, 0.5, 0.0), vec3<f32>(0.0, 1.0, 0.2), vec3<f32>(gridPulse));
+                            let gridCol = mix(lineCol, vec3<f32>(0.0, 0.05, 0.0), vec3<f32>(smoothstep(0.01, 0.03, gridLine)));
                             base = MapRes(floorDist, gridCol, 0.0);
                         } else {
                             // Wireframe on objects
@@ -272,7 +279,7 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                             let gh = abs(fract(gp.y) - 0.5);
                             let gz = abs(fract(gp.z) - 0.5);
                             if (min(min(gw, gh), gz) < 0.02) {
-                                base.color = mix(base.color, vec3<f32>(0.0, 1.0, 0.0), 0.5);
+                                base.color = mix(base.color, vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.5));
                             }
                         }
                     }
@@ -372,19 +379,20 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                     let c = res.color * (ambient + sunDot * vec3<f32>(0.8, 0.8, 0.8));
 
                     let fogDist = clamp((t - 15.0) / 105.0, 0.0, 1.0);
-                    var finalColor = mix(c, fogCol, fogDist);
+                    var finalColor = mix(c, fogCol, vec3<f32>(fogDist));
 
                     // Thermal Diaphragm
                     if (u.params2.x > 0.5) {
+                        let intensityLevel = u.params2.y;
                         let lum = dot(finalColor, vec3<f32>(0.299, 0.587, 0.114)) * intensityLevel * 2.0;
-                        let thermalRed = mix(vec3<f32>(0.0, 0.0, 0.5), vec3<f32>(1.0, 0.0, 0.0), clamp(lum * 2.0, 0.0, 1.0));
-                        let thermalFinal = mix(thermalRed, vec3<f32>(1.0, 1.0, 0.0), clamp(lum * 2.0 - 1.0, 0.0, 1.0));
-                        thermalFinal = mix(thermalFinal, vec3<f32>(1.0, 1.0, 1.0), clamp(lum * 2.0 - 2.0, 0.0, 1.0));
+                        let thermalRed = mix(vec3<f32>(0.0, 0.0, 0.5), vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(clamp(lum * 2.0, 0.0, 1.0)));
+                        var thermalFinal = mix(thermalRed, vec3<f32>(1.0, 1.0, 0.0), vec3<f32>(clamp(lum * 2.0 - 1.0, 0.0, 1.0)));
+                        thermalFinal = mix(thermalFinal, vec3<f32>(1.0, 1.0, 1.0), vec3<f32>(clamp(lum * 2.0 - 2.0, 0.0, 1.0)));
                         
                         let distFromCenter = length(uv);
                         let vignette = smoothstep(1.5, 0.3 * intensityLevel, distFromCenter);
 
-                        finalColor = mix(finalColor, thermalFinal * vignette, clamp(intensityLevel, 0.0, 1.0));
+                        finalColor = mix(finalColor, thermalFinal * vignette, vec3<f32>(clamp(intensityLevel, 0.0, 1.0)));
                     }
 
                     return vec4<f32>(finalColor, 1.0);
@@ -393,11 +401,11 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
 
             const module = device.createShaderModule({ code: shaderCode });
             module.getCompilationInfo().then((info) => {
-                if (info.messages.length > 0) {
+                const errors = info.messages.filter((m: any) => m.type === 'error');
+                if (errors.length > 0) {
                     console.error('Shader compilation info:', info);
-                    if (coolingTextRef.current) {
-                        coolingTextRef.current.innerHTML = '<div class="text-[#FF3E3E]">SHADER ERROR: ' + info.messages[0].message + '</div>';
-                    }
+                    const errorMsg = errors[0].message;
+                    setGpuError('SHADER ERROR: ' + (errors[0].lineNum ? `Line ${errors[0].lineNum}: ` : '') + errorMsg);
                 }
             });
 
@@ -414,9 +422,7 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                     primitive: { topology: 'triangle-list' }
                 });
             } catch (e: any) {
-                if (coolingTextRef.current) {
-                    coolingTextRef.current.innerHTML = '<div class="text-[#FF3E3E]">PIPELINE ERROR: ' + e.message + '</div>';
-                }
+                setGpuError('PIPELINE ERROR: ' + e.message);
                 return;
             }
 
@@ -1119,6 +1125,11 @@ Vel.Y: ${velocityY.toFixed(4)}
 
     return (
         <div className="fixed inset-0 z-50 bg-black overflow-hidden select-none touch-none">
+            {gpuError && (
+                <div className="absolute top-10 left-10 p-4 bg-black/80 border border-red-500 text-red-500 font-mono text-xs z-[9999] whitespace-pre-wrap max-w-[80vw]">
+                    {gpuError}
+                </div>
+            )}
             <canvas ref={scanCanvasRef} className="hidden" />
             <canvas 
                 ref={canvasRef} 
