@@ -6,12 +6,24 @@ type CryptoRaymarcherProps = {
     onClose: () => void;
 };
 
+import { OrbitalMap, FRACTAL_QUOTAS } from './OrbitalMap';
+
 export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const mutatingRef = useRef(false);
     const [isLocked, setIsLocked] = useState(false);
     const [isMutatingUi, setIsMutatingUi] = useState(false);
     const [isLogOpen, setIsLogOpen] = useState(true);
+
+    const [showOrbitalMap, setShowOrbitalMap] = useState(false);
+    const forceJumpNonceRef = useRef<number | null>(null);
+
+    const memoryBrainRef = useRef<FRACTAL_QUOTAS>({
+        L1_BASE: { minFloor: 1, maxFloor: 10, limit: 128, nodes: [] },
+        L2_MID: { minFloor: 11, maxFloor: 25, limit: 64, nodes: [] },
+        L3_DEEP: { minFloor: 26, maxFloor: 40, limit: 32, nodes: [] },
+        L4_SINGULARITY: { minFloor: 41, maxFloor: 999999, limit: 32, nodes: [] }
+    });
 
     const [discoveries, setDiscoveries] = useState<{nonce: number, hash: string, zeros: number, id: number, header: string}[]>([]);
     const [topDiscoveries, setTopDiscoveries] = useState<{nonce: number, hash: string, zeros: number, id: number, header: string}[]>([]);
@@ -192,51 +204,117 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                     return h;
                 }
 
-                fn getGeometry(pos: vec3<f32>) -> MapRes {
-                    let intensity = u.params.w;
-                    let t = u.params.x;
+                fn sdCapsule(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, r: f32) -> f32 {
+                    let pa = p - a;
+                    let ba = b - a;
+                    let h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0);
+                    return length(pa - ba * h) - r;
+                }
 
+                fn getCellData(cell: vec3<f32>, t: f32, intensity: f32) -> vec4<f32> {
                     let c = 6.0;
-                    let cell = floor((pos + vec3<f32>(c*0.5)) / c);
-                    let p_base = pos - cell * c;
-
-                    var p = p_base + vec3<f32>(
-                        sin(p_base.y * 3.0 + t * 2.0),
-                        cos(p_base.z * 3.0 + t * 2.0),
-                        sin(p_base.x * 3.0 + t * 2.0)
-                    ) * intensity * 1.5;
-
                     let idx = u32(abs(cell.x + cell.y * 32.0 + cell.z * 1024.0)) % 1024u;
                     let seed = hash3(cell);
                     let nzeros = entropyBuffer.data[idx];
                     let nz = f32(nzeros);
+
+                    let original_pos = cell * c;
+                    
+                    var wobble = vec3<f32>(
+                        sin(original_pos.y * 3.0 + t * 2.0),
+                        cos(original_pos.z * 3.0 + t * 2.0),
+                        sin(original_pos.x * 3.0 + t * 2.0)
+                    ) * intensity * 1.5;
 
                     var offset = vec3<f32>(
                         sin(t*2.0 + f32(seed)), 
                         cos(t*3.0 + f32(seed)), 
                         sin(t*1.5 - f32(seed))
                     ) * 0.5 * (1.0 + intensity);
+
+                    return vec4<f32>(original_pos + wobble + offset, nz);
+                }
+
+                fn getGeometry(pos: vec3<f32>) -> MapRes {
+                    let intensity = u.params.w;
+                    let t = u.params.x;
+
+                    let c = 6.0;
+                    let cell = floor((pos + vec3<f32>(c*0.5)) / c);
                     
-                    var rad = 0.6 + intensity * 0.3;
-                    if (nz <= 17.0) {
-                        rad += nz * 0.1;
-                    } else {
-                        rad += 17.0 * 0.1 + (nz - 17.0) * 0.05;
-                    }
+                    var minDist = 1000.0;
+                    var finalCol = vec3<f32>(0.0);
                     
-                    var d = sdSphere(p - offset, rad);
-                    
-                    var col = vec3<f32>(0.0);
-                    if (nz <= 7.0) {
-                        let intensityColor = clamp((nz) / 7.0, 0.0, 1.0) * 0.6 + 0.1;
-                        col = vec3<f32>(intensityColor * 0.2, intensityColor, intensityColor * 0.3 + 0.1);
-                    } else {
-                        // 0.16 is Yellow, 0.5 is Cyan (middle of rainbow)
-                        let hue = mix(0.16, 0.5, clamp((nz - 7.0) / 10.0, 0.0, 1.0));
-                        col = hsv2rgb(vec3<f32>(hue, 1.0, 1.0));
+                    // Evaluate 2x2x2 neighborhood to form the mesh
+                    for(var dx = -1; dx <= 1; dx++) {
+                        for(var dy = -1; dy <= 1; dy++) {
+                            for(var dz = -1; dz <= 1; dz++) {
+                                let nc = cell + vec3<f32>(f32(dx), f32(dy), f32(dz));
+                                let dData = getCellData(nc, t, intensity);
+                                let nz = dData.w;
+                                
+                                if (nz > 0.0) {
+                                    var rad = 0.6 + intensity * 0.3;
+                                    if (nz <= 17.0) {
+                                        rad += nz * 0.1;
+                                    } else {
+                                        rad += 17.0 * 0.1 + (nz - 17.0) * 0.05;
+                                    }
+                                    
+                                    let nodeDist = sdSphere(pos - dData.xyz, rad);
+                                    
+                                    var col = vec3<f32>(0.0);
+                                    if (nz <= 7.0) {
+                                        let intC = clamp(nz / 7.0, 0.0, 1.0) * 0.6 + 0.1;
+                                        col = vec3<f32>(intC * 0.2, intC, intC * 0.3 + 0.1);
+                                    } else {
+                                        let hue = mix(0.16, 0.5, clamp((nz - 7.0) / 10.0, 0.0, 1.0));
+                                        col = hsv2rgb(vec3<f32>(hue, 1.0, 1.0));
+                                    }
+
+                                    if (nodeDist < minDist) {
+                                        minDist = nodeDist;
+                                        finalCol = col;
+                                    }
+
+                                    // Connections to Positive neighbors
+                                    // Evaluate capsules for all 27 neighbors to prevent rendering cutoffs at cell edges
+                                    // Link X
+                                    let xData = getCellData(nc + vec3<f32>(1.0, 0.0, 0.0), t, intensity);
+                                    if (xData.w > 0.0) {
+                                        let linkWeight = (nz + xData.w) * 0.02;
+                                        let linkDist = sdCapsule(pos, dData.xyz, xData.xyz, 0.1 + linkWeight);
+                                        if (linkDist < minDist) {
+                                            minDist = linkDist;
+                                            finalCol = mix(col, vec3<f32>(0.0, 1.0, 0.5), 0.5);
+                                        }
+                                    }
+                                    // Link Y
+                                    let yData = getCellData(nc + vec3<f32>(0.0, 1.0, 0.0), t, intensity);
+                                    if (yData.w > 0.0) {
+                                        let linkWeight = (nz + yData.w) * 0.02;
+                                        let linkDist = sdCapsule(pos, dData.xyz, yData.xyz, 0.1 + linkWeight);
+                                        if (linkDist < minDist) {
+                                            minDist = linkDist;
+                                            finalCol = mix(col, vec3<f32>(0.0, 1.0, 0.5), 0.5);
+                                        }
+                                    }
+                                    // Link Z
+                                    let zData = getCellData(nc + vec3<f32>(0.0, 0.0, 1.0), t, intensity);
+                                    if (zData.w > 0.0) {
+                                        let linkWeight = (nz + zData.w) * 0.02;
+                                        let linkDist = sdCapsule(pos, dData.xyz, zData.xyz, 0.1 + linkWeight);
+                                        if (linkDist < minDist) {
+                                            minDist = linkDist;
+                                            finalCol = mix(col, vec3<f32>(0.0, 1.0, 0.5), 0.5);
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
 
-                    return MapRes(d, col, 0.0);
+                    return MapRes(minDist, finalCol, 0.0);
                 }
 
                 fn map(pos: vec3<f32>) -> MapRes {
@@ -752,13 +830,6 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
             let lastTelemetryTime = performance.now();
 
             // Фрактальная Память (Генетические Мозги)
-            const memoryBrain = {
-                L1_BASE: { minFloor: 1, maxFloor: 10, limit: 128, nodes: [] as {minNonce: number, maxNonce: number, weight: number}[] },
-                L2_MID: { minFloor: 11, maxFloor: 25, limit: 64, nodes: [] as {minNonce: number, maxNonce: number, weight: number}[] },
-                L3_DEEP: { minFloor: 26, maxFloor: 40, limit: 32, nodes: [] as {minNonce: number, maxNonce: number, weight: number}[] },
-                L4_SINGULARITY: { minFloor: 41, maxFloor: 999999, limit: 32, nodes: [] as {minNonce: number, maxNonce: number, weight: number}[] }
-            };
-
             let lastThermalScanTime = performance.now();
 
             const render = (time: number) => {
@@ -794,8 +865,14 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
 
                         // ФРАКТАЛЬНАЯ НАВИГАЦИЯ (МОЗГИ РОЯ)
                         let navigated = false;
-                        if (Math.random() < 0.3) {
-                            const levels = [memoryBrain.L1_BASE, memoryBrain.L2_MID, memoryBrain.L3_DEEP, memoryBrain.L4_SINGULARITY];
+                        
+                        if (forceJumpNonceRef.current !== null) {
+                            nonce = forceJumpNonceRef.current;
+                            forceJumpNonceRef.current = null;
+                            navigated = true;
+                        } else if (Math.random() < 0.3) {
+                            const mb = memoryBrainRef.current;
+                            const levels = [mb.L1_BASE, mb.L2_MID, mb.L3_DEEP, mb.L4_SINGULARITY];
                             for (let level of levels) {
                                 if (level.nodes.length > 0) {
                                     // Прыжок в самую перспективную зону
@@ -838,15 +915,16 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
 
                         // ЧЕКПОИНТ В ПАМЯТЬ
                         if (batchMaxZeros >= 14) {
-                            if (batchMaxZeros <= memoryBrain.L1_BASE.maxFloor) {
-                                memoryBrain.L1_BASE.nodes.push({minNonce: batchBestNonce - 5000, maxNonce: batchBestNonce, weight: 1});
-                                if (memoryBrain.L1_BASE.nodes.length > memoryBrain.L1_BASE.limit) memoryBrain.L1_BASE.nodes.shift();
-                            } else if (batchMaxZeros <= memoryBrain.L2_MID.maxFloor) {
-                                memoryBrain.L2_MID.nodes.push({minNonce: batchBestNonce - 5000, maxNonce: batchBestNonce, weight: 2});
-                                if (memoryBrain.L2_MID.nodes.length > memoryBrain.L2_MID.limit) memoryBrain.L2_MID.nodes.shift();
+                            const mb = memoryBrainRef.current;
+                            if (batchMaxZeros <= mb.L1_BASE.maxFloor) {
+                                mb.L1_BASE.nodes.push({minNonce: batchBestNonce - 5000, maxNonce: batchBestNonce, weight: 1, mask: batchBestHashData[0], maxFloor: batchMaxZeros});
+                                if (mb.L1_BASE.nodes.length > mb.L1_BASE.limit) mb.L1_BASE.nodes.shift();
+                            } else if (batchMaxZeros <= mb.L2_MID.maxFloor) {
+                                mb.L2_MID.nodes.push({minNonce: batchBestNonce - 5000, maxNonce: batchBestNonce, weight: 2, mask: batchBestHashData[0], maxFloor: batchMaxZeros});
+                                if (mb.L2_MID.nodes.length > mb.L2_MID.limit) mb.L2_MID.nodes.shift();
                             } else {
-                                memoryBrain.L3_DEEP.nodes.push({minNonce: batchBestNonce - 5000, maxNonce: batchBestNonce, weight: 3});
-                                if (memoryBrain.L3_DEEP.nodes.length > memoryBrain.L3_DEEP.limit) memoryBrain.L3_DEEP.nodes.shift();
+                                mb.L3_DEEP.nodes.push({minNonce: batchBestNonce - 5000, maxNonce: batchBestNonce, weight: 3, mask: batchBestHashData[0], maxFloor: batchMaxZeros});
+                                if (mb.L3_DEEP.nodes.length > mb.L3_DEEP.limit) mb.L3_DEEP.nodes.shift();
                             }
                         }
 
@@ -1116,6 +1194,15 @@ Vel.Y: ${velocityY.toFixed(4)}
 
     return (
         <div className="fixed inset-0 z-50 bg-black overflow-hidden select-none touch-none">
+            {showOrbitalMap && (
+                <OrbitalMap 
+                    memoryBrain={memoryBrainRef} 
+                    onTargetNode={(nonce) => {
+                        forceJumpNonceRef.current = nonce;
+                        setShowOrbitalMap(false);
+                    }} 
+                />
+            )}
             {gpuError && (
                 <div className="absolute top-10 left-10 p-4 bg-black/80 border border-red-500 text-red-500 font-mono text-xs z-[9999] whitespace-pre-wrap max-w-[80vw]">
                     {gpuError}
@@ -1284,14 +1371,17 @@ Vel.Y: ${velocityY.toFixed(4)}
                                 </div>
 
                                 <div className="flex flex-col gap-1 w-full relative">
-                                    <label className="text-[#00FF41] font-mono text-[9px] uppercase drop-shadow-[0_1px_1px_rgba(0,0,0,1)] flex justify-between cursor-pointer" onClick={() => {
-                                        const next = !diaphragmOn;
-                                        setDiaphragmOn(next);
-                                        diaphragmOnRef.current = next;
-                                    }}>
-                                        <span>Тепловая Диафрагма (Нажми)</span>
+                                    <button 
+                                        className={`font-mono text-[9px] uppercase drop-shadow-[0_1px_1px_rgba(0,0,0,1)] border px-1 py-0.5 mt-2 transition-colors flex justify-between ${diaphragmOn ? 'text-black bg-[#00FF41] border-[#00FF41]' : 'text-[#00FF41] border-[#00FF41]/30 hover:bg-[#00FF41]/10'}`}
+                                        onClick={() => {
+                                            const next = !diaphragmOn;
+                                            setDiaphragmOn(next);
+                                            diaphragmOnRef.current = next;
+                                        }}
+                                    >
+                                        <span>Тепловая Диафрагма</span>
                                         <span>{diaphragmOn ? "ВКЛ" : "ВЫКЛ"}</span>
-                                    </label>
+                                    </button>
                                     <input 
                                         type="range" 
                                         min="0" 
@@ -1321,6 +1411,15 @@ Vel.Y: ${velocityY.toFixed(4)}
                                         Бесконечная Сетка
                                     </label>
                                 </div>
+
+                                <button 
+                                    onClick={() => {
+                                        setShowOrbitalMap(!showOrbitalMap);
+                                    }}
+                                    className={`text-[9px] text-left font-mono uppercase transition-colors drop-shadow-[0_1px_1px_rgba(0,0,0,1)] border px-1 py-0.5 mt-2 ${showOrbitalMap ? 'text-black bg-[#AD00FF] border-[#AD00FF]' : 'text-[#AD00FF] border-[#AD00FF]/30 hover:bg-[#AD00FF]/10'}`}
+                                >
+                                    {showOrbitalMap ? 'СКРЫТЬ ФРАКТАЛ' : 'ОРБИТАЛЬНЫЙ НАДЗОР (MAP)'}
+                                </button>
 
                                 <button 
                                     onClick={() => {
