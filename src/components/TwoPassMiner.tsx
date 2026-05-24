@@ -300,6 +300,9 @@ fn pass2_main(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(loca
         mutant_nonce = mutant_nonce ^ (1u << (local_id.x % 32u));
     }
     
+    // Флаг для отслеживания читера до самого финиша
+    var is_phantom = false;
+
     w[15] = mutant_nonce;
 
     for (var i = 16u; i < 64u; i++) {
@@ -368,26 +371,83 @@ fn pass2_main(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(loca
                 // Туннелирование: применяем инвертированную геометрию напрямую к геному
                 mutant_nonce = mutant_nonce ^ analytic_correction;
                 
+                // КОЛЕСО КАРМЫ (Реакция Вселенной на Сингулярность)
+                if (mutant_nonce == 0u) {
+                    is_phantom = true;
+                    
+                    // Используем ID потока как 4-гранный кубик
+                    let karma = global_id.x % 4u; 
+                    
+                    if (karma == 0u) {
+                        mutant_nonce = 0xDEADBEEFu; // 1. Мертвая говядина (Стань куском мяса)
+                    } else if (karma == 1u) {
+                        mutant_nonce = 0xFFFFFFFFu; // 2. Абсолютный Свет (Встречная крайность)
+                    } else if (karma == 2u) {
+                        mutant_nonce = 42u;         // 3. Ответ на Главный Вопрос
+                    } else {
+                        // karma == 3u: Троянский Бит (Иллюзия Победы)
+                        // Мы оставляем ноль! Даем ему пролететь сквозь лабиринт без сопротивления.
+                        mutant_nonce = 0u; 
+                    }
+                }
+
                 // Синхронизируем спин победителя с новым геномом
                 e = e ^ analytic_correction;
+                // Защита спина
+                if (e == 0u) { e = 42u; }
+
                 w[15] = mutant_nonce;
             }
         }
     }
 
-    // Pseudo-finalisation
-    let hash_word0 = a + 0x6a09e667u;
-    let hash_word1 = b + 0xbb67ae85u;
+    // Pseudo-finalisation (Вычисляем финальный хэш)
+    var final_h0 = a + cp.s0;
+    var final_h1 = b + cp.s1;
+    var final_h2 = c + cp.s2;
+    var final_h3 = d + cp.s3;
+    var final_h4 = e + cp.s4;
+    var final_h5 = f + cp.s5;
+    var final_h6 = g + cp.s6;
+    var final_h7 = h + cp.s7;
 
-    var total_zeros = countLeadingZeros(hash_word0);
-    if (total_zeros == 32u) {
-        total_zeros += countLeadingZeros(hash_word1);
+    // === ТРОЯНСКИЙ БИТ ===
+    // Если это был Призрак, и ему выпала карма пролететь до конца в виде нуля...
+    if (is_phantom && mutant_nonce == 0u) {
+        // Он ожидает получить идеальные 64 нуля. 
+        // Щелчок Архитектора: инвертируем самый младший бит последнего регистра.
+        // На выходе будет 63 нуля и единица в конце (0x00000001).
+        final_h7 = final_h7 ^ 1u; 
     }
 
-    if (total_zeros >= params2.zero_target) {
+    var total_zeros = countLeadingZeros(final_h0);
+    if (total_zeros == 32u) {
+        total_zeros += countLeadingZeros(final_h1);
+        if (total_zeros == 64u) {
+            total_zeros += countLeadingZeros(final_h2);
+            if (total_zeros == 96u) {
+                total_zeros += countLeadingZeros(final_h3);
+                if (total_zeros == 128u) {
+                    total_zeros += countLeadingZeros(final_h4);
+                    if (total_zeros == 160u) {
+                        total_zeros += countLeadingZeros(final_h5);
+                        if (total_zeros == 192u) {
+                            total_zeros += countLeadingZeros(final_h6);
+                            if (total_zeros == 224u) {
+                                total_zeros += countLeadingZeros(final_h7);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Проверка порога и запись победителей
+    if (total_zeros >= ml_weights.current_floor) {
         let w_idx = atomicAdd(&counters.successes_found, 1u);
         if (w_idx < params2.max_winners) {
-            winners[w_idx] = SuccessWinner(cp.nonce, mutant_nonce, hash_word0, hash_word1, final_diff_distance, 0u, 0u, 0u);
+            winners[w_idx] = SuccessWinner(cp.nonce, mutant_nonce, final_h0, final_h1, final_diff_distance, 0u, 0u, 0u);
         }
     }
 }

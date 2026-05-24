@@ -16,6 +16,7 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
     const [isLogOpen, setIsLogOpen] = useState(true);
 
     const [showOrbitalMap, setShowOrbitalMap] = useState(false);
+    const showOrbitalMapRef = useRef(false);
     const forceJumpNonceRef = useRef<number | null>(null);
 
     const memoryBrainRef = useRef<FRACTAL_QUOTAS>({
@@ -1060,33 +1061,35 @@ Vel.Y: ${velocityY.toFixed(4)}
                     }
                 }
 
-                const uniforms = new Float32Array([
-                    posX, posY, posZ, 0,
-                    camForward[0], camForward[1], camForward[2], 0,
-                    camRight[0], camRight[1], camRight[2], 0,
-                    camUp[0], camUp[1], camUp[2], 0,
-                    appTimeRef.current * 0.001, canvas.width, canvas.height, noiseIntensityRef.current,
-                    diaphragmOnRef.current ? 1.0 : 0.0, diaphragmIntensityRef.current, voxelModeRef.current ? 1.0 : 0.0, gridModeRef.current ? 1.0 : 0.0
-                ]);
-                device.queue.writeBuffer(uniformBuffer, 0, uniforms);
-                device.queue.writeBuffer(gpuVoxelsBuffer, 0, voxelsRef.current);
+                if (!showOrbitalMapRef.current) {
+                    const uniforms = new Float32Array([
+                        posX, posY, posZ, 0,
+                        camForward[0], camForward[1], camForward[2], 0,
+                        camRight[0], camRight[1], camRight[2], 0,
+                        camUp[0], camUp[1], camUp[2], 0,
+                        appTimeRef.current * 0.001, canvas.width, canvas.height, noiseIntensityRef.current,
+                        diaphragmOnRef.current ? 1.0 : 0.0, diaphragmIntensityRef.current, voxelModeRef.current ? 1.0 : 0.0, gridModeRef.current ? 1.0 : 0.0
+                    ]);
+                    device.queue.writeBuffer(uniformBuffer, 0, uniforms);
+                    device.queue.writeBuffer(gpuVoxelsBuffer, 0, voxelsRef.current);
 
-                const commandEncoder = device.createCommandEncoder();
-                const passEncoder = commandEncoder.beginRenderPass({
-                    colorAttachments: [{
-                        view: context.getCurrentTexture().createView(),
-                        clearValue: { r: 0, g: 0, b: 0, a: 1 },
-                        loadOp: 'clear',
-                        storeOp: 'store',
-                    }]
-                });
+                    const commandEncoder = device.createCommandEncoder();
+                    const passEncoder = commandEncoder.beginRenderPass({
+                        colorAttachments: [{
+                            view: context.getCurrentTexture().createView(),
+                            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                            loadOp: 'clear',
+                            storeOp: 'store',
+                        }]
+                    });
 
-                passEncoder.setPipeline(pipeline);
-                passEncoder.setBindGroup(0, bindGroup);
-                passEncoder.draw(3, 1, 0, 0);
-                passEncoder.end();
+                    passEncoder.setPipeline(pipeline);
+                    passEncoder.setBindGroup(0, bindGroup);
+                    passEncoder.draw(3, 1, 0, 0);
+                    passEncoder.end();
 
-                device.queue.submit([commandEncoder.finish()]);
+                    device.queue.submit([commandEncoder.finish()]);
+                }
 
                 // Тепловой датчик (Сканирование)
                 if (now - lastThermalScanTime > 200) {
@@ -1200,6 +1203,7 @@ Vel.Y: ${velocityY.toFixed(4)}
                     onTargetNode={(nonce) => {
                         forceJumpNonceRef.current = nonce;
                         setShowOrbitalMap(false);
+                        showOrbitalMapRef.current = false;
                     }} 
                 />
             )}
@@ -1414,7 +1418,9 @@ Vel.Y: ${velocityY.toFixed(4)}
 
                                 <button 
                                     onClick={() => {
-                                        setShowOrbitalMap(!showOrbitalMap);
+                                        const next = !showOrbitalMap;
+                                        setShowOrbitalMap(next);
+                                        showOrbitalMapRef.current = next;
                                     }}
                                     className={`text-[9px] text-left font-mono uppercase transition-colors drop-shadow-[0_1px_1px_rgba(0,0,0,1)] border px-1 py-0.5 mt-2 ${showOrbitalMap ? 'text-black bg-[#AD00FF] border-[#AD00FF]' : 'text-[#AD00FF] border-[#AD00FF]/30 hover:bg-[#AD00FF]/10'}`}
                                 >

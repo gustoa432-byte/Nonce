@@ -73,9 +73,20 @@ const InstancedNodes = ({ memoryBrain, onTargetNode }: OrbitalMapProps) => {
             dummy.updateMatrix();
             meshRef.current.setMatrixAt(i, dummy.matrix);
             
-            // Градиент цвета: от голубого (17 эт) до темно-синего/черного (60+ эт)
-            let depthHue = Math.max(0, 1 - (node.maxFloor / 70)); 
-            color.setHSL(0.6, 1.0, depthHue * 0.5); // 0.6 = Синий спектр
+            // Иерархия цветов по этажу (zeros)
+            let r = 0, g = 0, b = 0;
+            if (node.maxFloor <= 18) {
+                // Темно Зеленое - до зелёного
+                g = Math.max(0.3, node.maxFloor / 18.0);
+            } else if (node.maxFloor <= 30) {
+                // Желтый
+                r = 1.0;
+                g = 1.0;
+            } else {
+                // Красный
+                r = 1.0;
+            }
+            color.setRGB(r, g, b);
             meshRef.current.setColorAt(i, color);
 
             // Create connections to previous node to form a fractal strand
@@ -88,9 +99,16 @@ const InstancedNodes = ({ memoryBrain, onTargetNode }: OrbitalMapProps) => {
                 // Add start and end points for the line
                 positions.push(px, py, pz, posX, posY, posZ);
                 
-                // Colors for line vertices based on weight summing
-                const weightRatio = Math.min(1.0, (node.weight + prevNode.weight) / 10.0);
-                colors.push(0, weightRatio, 1 - weightRatio, 0, weightRatio, 1 - weightRatio);
+                let pr = 0, pg = 0, pb = 0;
+                if (prevNode.maxFloor <= 18) {
+                    pg = Math.max(0.3, prevNode.maxFloor / 18.0);
+                } else if (prevNode.maxFloor <= 30) {
+                    pr = 1.0; pg = 1.0;
+                } else {
+                    pr = 1.0;
+                }
+                
+                colors.push(pr, pg, pb, r, g, b);
             }
         }
 
@@ -138,7 +156,7 @@ const InstancedNodes = ({ memoryBrain, onTargetNode }: OrbitalMapProps) => {
 
 export const OrbitalMap = (props: OrbitalMapProps) => {
     return (
-        <div className="absolute inset-0 z-40 bg-black/80 backdrop-blur-sm pointer-events-auto flex items-center justify-center">
+        <div className="absolute inset-0 z-40 bg-[url('https://www.transparenttextures.com/patterns/stardust.png')] bg-[#050505] pointer-events-auto flex items-center justify-center">
             <Canvas>
                 <ambientLight intensity={0.5} />
                 <pointLight position={[10, 10, 10]} intensity={1.5} />
