@@ -63,11 +63,13 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
     const [gridMode, setGridMode] = useState(false);
     const gridModeRef = useRef(false);
 
+    const MAX_VOXELS = 64;
+    const voxelsRef = useRef<Float32Array>(new Float32Array(MAX_VOXELS * 4));
+    const voxelCountRef = useRef(0);
+
     const handleContextMenu = (e: React.MouseEvent) => {
         e.preventDefault();
-        const newVal = !diaphragmOnRef.current;
-        diaphragmOnRef.current = newVal;
-        setDiaphragmOn(newVal);
+        // Disabling Context Menu toggle since we use right click for voxels.
     };
 
     const handleWheel = (e: React.WheelEvent) => {
@@ -123,12 +125,21 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                     forward: vec4<f32>,
                     right: vec4<f32>,
                     up: vec4<f32>,
-                    params: vec4<f32>, // x: time, y: resX, z: resY, w: pad
-                    params2: vec4<f32>, // x: diaphragmOn
+                    params: vec4<f32>,
+                    params2: vec4<f32>,
+                };
+
+                struct EntropyBuffer {
+                    data: array<u32>,
+                };
+
+                struct VoxelsBuffer {
+                    data: array<vec4<f32>>,
                 };
 
                 @group(0) @binding(0) var<uniform> u: Uniforms;
-                @group(0) @binding(1) var<storage, read> entropyBuffer: array<u32>;
+                @group(0) @binding(1) var<storage, read> entropyBuffer: EntropyBuffer;
+                @group(0) @binding(2) var<storage, read> voxelsBuffer: VoxelsBuffer;
 
                 struct MapRes {
                     dist: f32,
@@ -159,9 +170,9 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                 }
 
                 fn hsv2rgb(c: vec3<f32>) -> vec3<f32> {
-                    var K = vec4<f32>(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
-                    var p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
-                    return c.z * mix(K.xxx, clamp(p - K.xxx, vec3<f32>(0.0), vec3<f32>(1.0)), c.y);
+                    let p = abs(fract(vec3<f32>(c.x) + vec3<f32>(1.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - vec3<f32>(3.0));
+                    let rgb = clamp(p - vec3<f32>(1.0), vec3<f32>(0.0), vec3<f32>(1.0));
+                    return c.z * mix(vec3<f32>(1.0), rgb, vec3<f32>(c.y));
                 }
 
                 fn hash3(p: vec3<f32>) -> u32 {
@@ -191,7 +202,7 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
 
                     let idx = u32(abs(cell.x + cell.y * 32.0 + cell.z * 1024.0)) % 1024u;
                     let seed = hash3(cell);
-                    let nzeros = entropyBuffer[idx];
+                    let nzeros = entropyBuffer.data[idx];
                     let nz = f32(nzeros);
 
                     var offset = vec3<f32>(
@@ -207,21 +218,15 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                         rad += 17.0 * 0.1 + (nz - 17.0) * 0.05;
                     }
                     
-                    var d: f32 = 0.0;
-                    if (u.params2.z > 0.5) {
-                        // Voxel Box
-                        d = sdBox(p - offset, vec3<f32>(rad * 0.8));
-                    } else {
-                        // Smooth Sphere
-                        d = sdSphere(p - offset, rad);
-                    }
+                    var d = sdSphere(p - offset, rad);
                     
                     var col = vec3<f32>(0.0);
                     if (nz <= 17.0) {
                         let intensityColor = clamp(nz / 17.0, 0.05, 1.0);
                         col = vec3<f32>(intensityColor, intensityColor, 0.0);
                     } else {
-                        let hue = mix(0.0, 0.4, clamp((nz - 17.0) / 10.0, 0.0, 1.0));
+                        // 0.16 is Yellow, 0.5 is Cyan (middle of rainbow)
+                        let hue = mix(0.16, 0.5, clamp((nz - 17.0) / 10.0, 0.0, 1.0));
                         col = hsv2rgb(vec3<f32>(hue, 1.0, 1.0));
                     }
 
@@ -231,6 +236,25 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                 fn map(pos: vec3<f32>) -> MapRes {
                     var base = getGeometry(pos);
                     
+                    // Voxels for orientation
+                    for(var i = 0u; i < 64u; i++) {
+                        let vox = voxelsBuffer.data[i];
+                        if (vox.w > 0.5) {
+                            let vd = sdBox(pos - vox.xyz, vec3<f32>(0.48));
+                            if (vd < base.dist) {
+                                base = MapRes(vd, vec3<f32>(0.5, 0.5, 0.5), 0.0);
+                                // Optional edge highlight
+                                let vp = (pos - vox.xyz) * 2.0;
+                                let aw = abs(vp);
+                                if (max(max(aw.x, aw.y), aw.z) > 0.92) {
+                                    base.color = vec3<f32>(1.0, 1.0, 1.0);
+                                }
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+
                     // Grid Mode
                     if (u.params2.w > 0.5) {
                         let floorDist = pos.y + 8.0;
@@ -265,7 +289,7 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                             for(var kx = -1; kx <= 1; kx++) {
                                 let ncell = centerCell + vec3<f32>(f32(kx), f32(ky), f32(kz));
                                 let idx = u32(abs(ncell.x + ncell.y * 32.0 + ncell.z * 1024.0)) % 1024u;
-                                let nzeros = entropyBuffer[idx];
+                                let nzeros = entropyBuffer.data[idx];
                                 
                                 if (nzeros >= 18u) {
                                     let np = pos - ncell * c;
@@ -400,11 +424,17 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
             }
             device.queue.writeBuffer(entropyBuffer, 0, cpuEntropy);
 
+            const gpuVoxelsBuffer = device.createBuffer({
+                size: 64 * 16, // 64 vec4
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            });
+
             const bindGroup = device.createBindGroup({
                 layout: pipeline.getBindGroupLayout(0),
                 entries: [
                     { binding: 0, resource: { buffer: uniformBuffer } },
-                    { binding: 1, resource: { buffer: entropyBuffer } }
+                    { binding: 1, resource: { buffer: entropyBuffer } },
+                    { binding: 2, resource: { buffer: gpuVoxelsBuffer } }
                 ]
             });
 
@@ -460,6 +490,57 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                 camForward = normalize(camForward);
                 camRight = normalize(camRight);
                 camUp = normalize(camUp);
+            };
+
+            const onMouseDown = (e: MouseEvent) => {
+                if (document.pointerLockElement !== canvas) return;
+                if (e.button === 0) {
+                    if (voxelCountRef.current < 64) {
+                        const placeDist = 4.0;
+                        const px = Math.round(posX + camForward[0] * placeDist);
+                        const py = Math.round(posY + camForward[1] * placeDist);
+                        const pz = Math.round(posZ + camForward[2] * placeDist);
+                        
+                        const idx = voxelCountRef.current * 4;
+                        voxelsRef.current[idx] = px;
+                        voxelsRef.current[idx + 1] = py;
+                        voxelsRef.current[idx + 2] = pz;
+                        voxelsRef.current[idx + 3] = 1.0;
+                        voxelCountRef.current++;
+                    }
+                } else if (e.button === 2) {
+                    let hitIdx = -1;
+                    let minDist = 1000.0;
+                    for (let i = 0; i < voxelCountRef.current; i++) {
+                        const idx = i * 4;
+                        const vx = voxelsRef.current[idx];
+                        const vy = voxelsRef.current[idx + 1];
+                        const vz = voxelsRef.current[idx + 2];
+                        
+                        const dx = vx - posX;
+                        const dy = vy - posY;
+                        const dz = vz - posZ;
+                        const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+                        if (dist < 8.0) {
+                            const dot = (dx*camForward[0] + dy*camForward[1] + dz*camForward[2]) / dist;
+                            if (dot > 0.95 && dist < minDist) {
+                                minDist = dist;
+                                hitIdx = i;
+                            }
+                        }
+                    }
+                    if (hitIdx !== -1) {
+                        const lastIdx = (voxelCountRef.current - 1) * 4;
+                        const targetIdx = hitIdx * 4;
+                        voxelsRef.current[targetIdx] = voxelsRef.current[lastIdx];
+                        voxelsRef.current[targetIdx + 1] = voxelsRef.current[lastIdx + 1];
+                        voxelsRef.current[targetIdx + 2] = voxelsRef.current[lastIdx + 2];
+                        voxelsRef.current[targetIdx + 3] = voxelsRef.current[lastIdx + 3];
+                        
+                        voxelsRef.current[lastIdx + 3] = 0.0;
+                        voxelCountRef.current--;
+                    }
+                }
             };
 
             let touchMoveId: number | null = null;
@@ -530,6 +611,7 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
             window.addEventListener('keydown', onKeyDown);
             window.addEventListener('keyup', onKeyUp);
             window.addEventListener('mousemove', onMouseMove);
+            window.addEventListener('mousedown', onMouseDown);
             canvas.addEventListener('touchstart', onTouchStart, { passive: false });
             canvas.addEventListener('touchmove', onTouchMove, { passive: false });
             canvas.addEventListener('touchend', onTouchEnd);
@@ -897,6 +979,7 @@ Vel.Y: ${velocityY.toFixed(4)}
                     diaphragmOnRef.current ? 1.0 : 0.0, diaphragmIntensityRef.current, voxelModeRef.current ? 1.0 : 0.0, gridModeRef.current ? 1.0 : 0.0
                 ]);
                 device.queue.writeBuffer(uniformBuffer, 0, uniforms);
+                device.queue.writeBuffer(gpuVoxelsBuffer, 0, voxelsRef.current);
 
                 const commandEncoder = device.createCommandEncoder();
                 const passEncoder = commandEncoder.beginRenderPass({
@@ -981,6 +1064,7 @@ Vel.Y: ${velocityY.toFixed(4)}
                 window.removeEventListener('keydown', onKeyDown);
                 window.removeEventListener('keyup', onKeyUp);
                 window.removeEventListener('mousemove', onMouseMove);
+                window.removeEventListener('mousedown', onMouseDown);
                 if (canvas) {
                     canvas.removeEventListener('touchstart', onTouchStart);
                     canvas.removeEventListener('touchmove', onTouchMove);
@@ -1100,6 +1184,10 @@ Vel.Y: ${velocityY.toFixed(4)}
                                 >
                                     {isMutatingUi ? '> Энтропия Активна [F]' : '> Энтропия Пауза [F]'}
                                 </button>
+                                <div className="text-[9px] text-[#00FF41]/70 font-mono uppercase leading-tight drop-shadow-[0_1px_1px_rgba(0,0,0,1)]">
+                                    [ЛКМ] - Установить маркер<br/>
+                                    [ПКМ] - Убрать маркер
+                                </div>
                                 <div ref={coolingTextRef} className="empty:hidden" />
 
                                 <div className="flex flex-col gap-1 w-full relative">
@@ -1199,18 +1287,6 @@ Vel.Y: ${velocityY.toFixed(4)}
                                 </div>
 
                                 <div className="flex flex-col gap-1 w-full mt-1">
-                                    <label className="flex items-center gap-2 text-[#00FF41] text-[9px] font-mono uppercase cursor-pointer">
-                                        <input 
-                                            type="checkbox" 
-                                            checked={voxelMode}
-                                            onChange={e => {
-                                                setVoxelMode(e.target.checked);
-                                                voxelModeRef.current = e.target.checked;
-                                            }}
-                                            className="appearance-none w-3 h-3 border border-[#00FF41] checked:bg-[#00FF41]"
-                                        />
-                                        Воксельные Полигоны
-                                    </label>
                                     <label className="flex items-center gap-2 text-[#00FF41] text-[9px] font-mono uppercase cursor-pointer">
                                         <input 
                                             type="checkbox" 
