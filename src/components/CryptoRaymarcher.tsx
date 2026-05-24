@@ -44,6 +44,14 @@ export function CryptoRaymarcher({ onClose, discoveries, setDiscoveries, topDisc
 
     const [pointerLockDisabled, setPointerLockDisabled] = useState(false);
 
+    const scanCanvasRef = useRef<HTMLCanvasElement>(null);
+    const [thermalStats, setThermalStats] = useState({ current: 0, norm: 0, deviation: 0 });
+    const thermalNormRef = useRef(0);
+    const thermalSamplesRef = useRef<number[]>([]);
+    const [sensorThresholdUI, setSensorThresholdUI] = useState(200);
+    const sensorThresholdRef = useRef(200);
+    const [isSensorOpen, setIsSensorOpen] = useState(true);
+
     const [diaphragmOn, setDiaphragmOn] = useState(false);
     const diaphragmOnRef = useRef(false);
 
@@ -600,6 +608,8 @@ export function CryptoRaymarcher({ onClose, discoveries, setDiscoveries, topDisc
                 L4_SINGULARITY: { minFloor: 41, maxFloor: 999999, limit: 32, nodes: [] as {minNonce: number, maxNonce: number, weight: number}[] }
             };
 
+            let lastThermalScanTime = performance.now();
+
             const render = (time: number) => {
                 animationId = requestAnimationFrame(render);
                 
@@ -861,6 +871,60 @@ Vel.Y: ${velocityY.toFixed(4)}
                 passEncoder.end();
 
                 device.queue.submit([commandEncoder.finish()]);
+
+                // Тепловой датчик (Сканирование)
+                if (now - lastThermalScanTime > 200) {
+                    lastThermalScanTime = now;
+                    const scanCanvas = scanCanvasRef.current;
+                    if (scanCanvas && canvas) {
+                        const w = canvas.width;
+                        const h = canvas.height;
+                        const scanW = Math.floor(w / 4);
+                        const scanH = h;
+                        
+                        scanCanvas.width = scanW;
+                        scanCanvas.height = scanH;
+                        const scanCtx = scanCanvas.getContext('2d', { willReadFrequently: true });
+                        if (scanCtx) {
+                            try {
+                                scanCtx.drawImage(canvas, w - scanW, 0, scanW, scanH, 0, 0, scanW, scanH);
+                                const imgData = scanCtx.getImageData(0, 0, scanW, scanH);
+                                const data = imgData.data;
+                                
+                                let yellowScore = 0;
+                                const thresh = sensorThresholdRef.current;
+                                
+                                for (let i = 0; i < data.length; i += 4) {
+                                    let r = data[i];
+                                    let g = data[i+1];
+                                    let b = data[i+2];
+                                    
+                                    if (r > thresh && g > thresh && b < 100) {
+                                        yellowScore += (r + g) / 2;
+                                    }
+                                }
+                                
+                                let currentScore = yellowScore / (scanW * scanH);
+                                
+                                if (thermalNormRef.current === 0) {
+                                    thermalSamplesRef.current.push(currentScore);
+                                    if (thermalSamplesRef.current.length >= 20) {
+                                        const sum = thermalSamplesRef.current.reduce((a, b) => a + b, 0);
+                                        thermalNormRef.current = sum / thermalSamplesRef.current.length;
+                                    }
+                                }
+                                
+                                setThermalStats({
+                                    current: currentScore,
+                                    norm: thermalNormRef.current,
+                                    deviation: thermalNormRef.current > 0 ? (currentScore - thermalNormRef.current) : 0
+                                });
+                            } catch (err) {
+                                // Ignore Canvas taint errors if any
+                            }
+                        }
+                    }
+                }
             };
 
             animationId = requestAnimationFrame(render);
@@ -909,6 +973,7 @@ Vel.Y: ${velocityY.toFixed(4)}
 
     return (
         <div className="fixed inset-0 z-50 bg-black overflow-hidden select-none touch-none">
+            <canvas ref={scanCanvasRef} className="hidden" />
             <canvas 
                 ref={canvasRef} 
                 className="w-full h-full block cursor-crosshair touch-none"
@@ -1137,7 +1202,14 @@ Vel.Y: ${velocityY.toFixed(4)}
                                             <div key={d.id} className="flex justify-between items-start group relative pb-1">
                                                 <div className="font-mono text-[9px] leading-tight flex flex-col gap-0.5">
                                                     <div className="text-[#00FF41] drop-shadow-[0_1px_2px_rgba(0,0,0,1)]">{'>'}{d.zeros}b0</div>
-                                                    <div className="text-white/60 drop-shadow-[0_1px_2px_rgba(0,0,0,1)]">N: {d.nonce}</div>
+                                                    <div className="text-white/60 drop-shadow-[0_1px_2px_rgba(0,0,0,1)]"
+                                                        dangerouslySetInnerHTML={{
+                                                            __html: parseInt(d.hash.substring(0, 8), 16)
+                                                                        .toString(2).padStart(32, '0')
+                                                                        .replace(/^0+/, (match) => `<span class="text-[#00FF41] font-bold">${match}</span>`)
+                                                                        .substring(0, 24)
+                                                        }} 
+                                                    />
                                                 </div>
                                                 <button 
                                                     className="text-[#00FF41]/60 hover:text-[#00FF41] transition-opacity p-1"
@@ -1182,7 +1254,14 @@ Vel.Y: ${velocityY.toFixed(4)}
                             {topDiscoveries.map((d, idx) => (
                                 <div key={d.id} className="flex justify-between items-center w-full text-[9px] font-mono group drop-shadow-[0_1px_2px_rgba(0,0,0,1)]">
                                     <div className="text-[#00FF41]">#{idx + 1} ({d.zeros}b0)</div>
-                                    <div className="text-white/50">0x{d.hash.substring(0, 8)}..</div>
+                                    <div className="text-white/50" 
+                                        dangerouslySetInnerHTML={{
+                                            __html: parseInt(d.hash.substring(0, 8), 16)
+                                                        .toString(2).padStart(32, '0')
+                                                        .replace(/^0+/, (match) => `<span class="text-[#00FF41] font-bold">${match}</span>`)
+                                                        .substring(0, 24) + ".."
+                                        }} 
+                                    />
                                     <button 
                                         className="text-[#00FF41]/60 hover:text-[#00FF41] transition-opacity p-1"
                                         onClick={() => {
@@ -1203,6 +1282,77 @@ Vel.Y: ${velocityY.toFixed(4)}
                     </AnimatePresence>
                 </div>
                 )}
+            </div>
+
+            {/* Тепловой Датчик (Справа) */}
+            <div className="absolute top-16 right-2 z-[75] flex flex-col gap-2 pointer-events-auto w-[230px] bg-black/60 backdrop-blur-md p-3 rounded-md border border-[#FFFB00]/20">
+                <button 
+                    onClick={() => setIsSensorOpen(!isSensorOpen)}
+                    className={`text-[9px] font-mono transition-colors tracking-widest drop-shadow-[0_1px_2px_rgba(0,0,0,1)] text-right w-full uppercase ${
+                        isSensorOpen ? 'text-[#FFFB00]' : 'text-white/50 hover:text-white'
+                    }`}
+                >
+                    {isSensorOpen ? '[-] ТЕПЛОВОЙ ДАТЧИК' : '[+] ТЕПЛОВОЙ ДАТЧИК'}
+                </button>
+                
+                <AnimatePresence>
+                    {isSensorOpen && (
+                        <motion.div 
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            className="overflow-hidden flex flex-col gap-3 font-mono"
+                        >
+                            <div className="text-[10px] text-[#FFFB00] flex flex-col gap-1 mt-2">
+                                <div className="flex justify-between">
+                                    <span className="opacity-70">ФОН:</span>
+                                    <span>{(thermalStats.norm * 100).toFixed(2)}%</span>
+                                </div>
+                                <div className="flex justify-between">
+                                    <span className="opacity-70">СЕЙЧАС:</span>
+                                    <span>{(thermalStats.current * 100).toFixed(2)}%</span>
+                                </div>
+                                <div className="flex justify-between pt-1 border-t border-[#FFFB00]/20 mt-1">
+                                    <span className="opacity-70">Δ ОТКЛ:</span>
+                                    <span className={thermalStats.deviation > 0.05 ? 'text-[#FF3E3E] font-bold' : (thermalStats.deviation > 0.01 ? 'text-[#FFFB00]' : 'text-[#00FF41]')}>
+                                        {(thermalStats.deviation * 100).toFixed(2)}%
+                                    </span>
+                                </div>
+                            </div>
+                            
+                            <div className="flex flex-col gap-1 w-full relative mt-2 text-[#FFFB00]">
+                                <label className="font-mono text-[9px] uppercase drop-shadow-[0_1px_1px_rgba(0,0,0,1)] flex justify-between">
+                                    <span>ПОРОГ (RGB)</span>
+                                    <span>{sensorThresholdUI}</span>
+                                </label>
+                                <input 
+                                    type="range" 
+                                    min="100" 
+                                    max="250" 
+                                    step="1" 
+                                    value={sensorThresholdUI} 
+                                    onChange={e => {
+                                        const val = parseInt(e.target.value);
+                                        setSensorThresholdUI(val);
+                                        sensorThresholdRef.current = val;
+                                    }}
+                                    className="w-full h-0.5 appearance-none bg-white/20 accent-[#FFFB00] outline-none cursor-pointer mt-1"
+                                />
+                            </div>
+
+                            <button 
+                                onClick={() => {
+                                    thermalNormRef.current = 0;
+                                    thermalSamplesRef.current = [];
+                                    setThermalStats({ current: 0, norm: 0, deviation: 0 });
+                                }}
+                                className="text-[9px] text-center font-mono uppercase transition-colors border border-[#FFFB00]/30 text-[#FFFB00] hover:bg-[#FFFB00]/10 py-1 mt-1"
+                            >
+                                СБРОС НОРМЫ
+                            </button>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
             </div>
 
             {/* Подсказки */}
