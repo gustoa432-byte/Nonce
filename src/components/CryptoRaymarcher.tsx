@@ -227,12 +227,12 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                     var d = sdSphere(p - offset, rad);
                     
                     var col = vec3<f32>(0.0);
-                    if (nz <= 17.0) {
-                        let intensityColor = clamp(nz / 17.0, 0.0, 1.0) * 0.8 + 0.2;
-                        col = vec3<f32>(intensityColor * 0.2, intensityColor, intensityColor * 0.5);
+                    if (nz <= 7.0) {
+                        let intensityColor = clamp((nz) / 7.0, 0.0, 1.0) * 0.6 + 0.1;
+                        col = vec3<f32>(intensityColor * 0.2, intensityColor, intensityColor * 0.3 + 0.1);
                     } else {
                         // 0.16 is Yellow, 0.5 is Cyan (middle of rainbow)
-                        let hue = mix(0.16, 0.5, clamp((nz - 17.0) / 10.0, 0.0, 1.0));
+                        let hue = mix(0.16, 0.5, clamp((nz - 7.0) / 10.0, 0.0, 1.0));
                         col = hsv2rgb(vec3<f32>(hue, 1.0, 1.0));
                     }
 
@@ -272,15 +272,6 @@ export function CryptoRaymarcher({ onClose }: CryptoRaymarcherProps) {
                             let lineCol = mix(vec3<f32>(0.0, 0.5, 0.0), vec3<f32>(0.0, 1.0, 0.2), vec3<f32>(gridPulse));
                             let gridCol = mix(lineCol, vec3<f32>(0.0, 0.05, 0.0), vec3<f32>(smoothstep(0.01, 0.03, gridLine)));
                             base = MapRes(floorDist, gridCol, 0.0);
-                        } else {
-                            // Wireframe on objects
-                            let gp = pos * 2.0;
-                            let gw = abs(fract(gp.x) - 0.5);
-                            let gh = abs(fract(gp.y) - 0.5);
-                            let gz = abs(fract(gp.z) - 0.5);
-                            if (min(min(gw, gh), gz) < 0.02) {
-                                base.color = mix(base.color, vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.5));
-                            }
                         }
                     }
 
@@ -1293,8 +1284,12 @@ Vel.Y: ${velocityY.toFixed(4)}
                                 </div>
 
                                 <div className="flex flex-col gap-1 w-full relative">
-                                    <label className="text-[#00FF41] font-mono text-[9px] uppercase drop-shadow-[0_1px_1px_rgba(0,0,0,1)] flex justify-between">
-                                        <span>Тепловая Диафрагма (ПКМ)</span>
+                                    <label className="text-[#00FF41] font-mono text-[9px] uppercase drop-shadow-[0_1px_1px_rgba(0,0,0,1)] flex justify-between cursor-pointer" onClick={() => {
+                                        const next = !diaphragmOn;
+                                        setDiaphragmOn(next);
+                                        diaphragmOnRef.current = next;
+                                    }}>
+                                        <span>Тепловая Диафрагма (Нажми)</span>
                                         <span>{diaphragmOn ? "ВКЛ" : "ВЫКЛ"}</span>
                                     </label>
                                     <input 
