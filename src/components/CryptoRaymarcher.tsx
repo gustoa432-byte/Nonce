@@ -44,6 +44,31 @@ export function CryptoRaymarcher({ onClose, discoveries, setDiscoveries, topDisc
 
     const [pointerLockDisabled, setPointerLockDisabled] = useState(false);
 
+    const [diaphragmOn, setDiaphragmOn] = useState(false);
+    const diaphragmOnRef = useRef(false);
+
+    const [diaphragmIntensityUI, setDiaphragmIntensityUI] = useState(1.0);
+    const diaphragmIntensityRef = useRef(1.0);
+
+    const handleContextMenu = (e: React.MouseEvent) => {
+        e.preventDefault();
+        const newVal = !diaphragmOnRef.current;
+        diaphragmOnRef.current = newVal;
+        setDiaphragmOn(newVal);
+    };
+
+    const handleWheel = (e: React.WheelEvent) => {
+        let speed = movementSpeedRef.current;
+        if (e.deltaY < 0) {
+            speed *= 1.2;
+        } else {
+            speed /= 1.2;
+        }
+        speed = Math.max(0.01, Math.min(speed, 50.0));
+        movementSpeedRef.current = speed;
+        setMovementSpeedUI(speed);
+    };
+
     const toggleMutations = () => {
         mutatingRef.current = !mutatingRef.current;
         setIsMutatingUi(mutatingRef.current);
@@ -84,6 +109,7 @@ export function CryptoRaymarcher({ onClose, discoveries, setDiscoveries, topDisc
                     right: vec4<f32>,
                     up: vec4<f32>,
                     params: vec4<f32>, // x: time, y: resX, z: resY, w: pad
+                    params2: vec4<f32>, // x: diaphragmOn
                 };
 
                 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -258,7 +284,20 @@ export function CryptoRaymarcher({ onClose, discoveries, setDiscoveries, topDisc
                     let c = res.color * (ambient + sunDot * vec3<f32>(0.8, 0.8, 0.8));
 
                     let fogDist = clamp((t - 15.0) / 105.0, 0.0, 1.0);
-                    let finalColor = mix(c, fogCol, fogDist);
+                    var finalColor = mix(c, fogCol, fogDist);
+
+                    // Thermal Diaphragm
+                    if (u.params2.x > 0.5) {
+                        let lum = dot(finalColor, vec3<f32>(0.299, 0.587, 0.114));
+                        let intensityLevel = u.params2.y;
+                        let thermalRed = mix(vec3<f32>(0.0, 0.0, 0.5), vec3<f32>(1.0, 0.0, 0.0), clamp(lum * 2.0 * intensityLevel, 0.0, 1.0));
+                        let thermalFinal = mix(thermalRed, vec3<f32>(1.0, 1.0, 0.0), clamp((lum * 2.0 - 1.0) * intensityLevel, 0.0, 1.0));
+                        
+                        let distFromCenter = length(uv);
+                        let vignette = smoothstep(1.5, 0.3 * intensityLevel, distFromCenter);
+
+                        finalColor = mix(finalColor, thermalFinal * vignette, clamp(intensityLevel, 0.0, 1.0));
+                    }
 
                     return vec4<f32>(finalColor, 1.0);
                 }
@@ -281,7 +320,7 @@ export function CryptoRaymarcher({ onClose, discoveries, setDiscoveries, topDisc
 
             // Buffers
             const uniformBuffer = device.createBuffer({
-                size: 80, // 5 * 16 bytes (5 vec4s)
+                size: 96, // 6 * 16 bytes (6 vec4s)
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             });
 
@@ -801,7 +840,8 @@ Vel.Y: ${velocityY.toFixed(4)}
                     camForward[0], camForward[1], camForward[2], 0,
                     camRight[0], camRight[1], camRight[2], 0,
                     camUp[0], camUp[1], camUp[2], 0,
-                    appTimeRef.current * 0.001, canvas.width, canvas.height, noiseIntensityRef.current
+                    appTimeRef.current * 0.001, canvas.width, canvas.height, noiseIntensityRef.current,
+                    diaphragmOnRef.current ? 1.0 : 0.0, diaphragmIntensityRef.current, 0, 0
                 ]);
                 device.queue.writeBuffer(uniformBuffer, 0, uniforms);
 
@@ -875,6 +915,8 @@ Vel.Y: ${velocityY.toFixed(4)}
                 onClick={() => {
                     if (!isLocked && !isMobile && !pointerLockDisabled) canvasRef.current?.requestPointerLock();
                 }}
+                onContextMenu={handleContextMenu}
+                onWheel={handleWheel}
             />
             
             {!isLocked && !isMobile && !pointerLockDisabled && (
@@ -1021,6 +1063,26 @@ Vel.Y: ${velocityY.toFixed(4)}
                                             }
                                         }}
                                         className="w-full bg-black/50 border border-[#00FF41]/30 text-[#00FF41] text-[10px] p-1 font-mono outline-none"
+                                    />
+                                </div>
+
+                                <div className="flex flex-col gap-1 w-full relative">
+                                    <label className="text-[#00FF41] font-mono text-[9px] uppercase drop-shadow-[0_1px_1px_rgba(0,0,0,1)] flex justify-between">
+                                        <span>Тепловая Диафрагма (ПКМ)</span>
+                                        <span>{diaphragmOn ? "ВКЛ" : "ВЫКЛ"}</span>
+                                    </label>
+                                    <input 
+                                        type="range" 
+                                        min="0" 
+                                        max="2" 
+                                        step="0.05" 
+                                        value={diaphragmIntensityUI} 
+                                        onChange={e => {
+                                            const val = parseFloat(e.target.value);
+                                            setDiaphragmIntensityUI(val);
+                                            diaphragmIntensityRef.current = val;
+                                        }}
+                                        className="w-full h-0.5 appearance-none bg-white/20 accent-[#FF3E3E] outline-none cursor-pointer mt-1"
                                     />
                                 </div>
 
