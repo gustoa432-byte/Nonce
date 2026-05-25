@@ -1177,7 +1177,7 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                 // Сбор статистики глобальной кривизны (Ricci Heatmap)
                 if (totalProbes >= 50) {
                     surgeryExecuted = true;
-                    const msg = `🔪 ТРУБА: Нет нового этажа за 50 батчей. Сжатие отрезка. (маска 0x${mlStateRef.current.anchorMask.toString(16)})`;
+                    const msg = `🔪 ТРУБА: Сжатие отрезка [${mlStateRef.current.anchorStartNonce} ... ${baseNonce}]. (маска 0x${mlStateRef.current.anchorMask.toString(16)})`;
                     console.log(msg);
                     addLog(msg, 'evo');
                         
