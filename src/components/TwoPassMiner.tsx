@@ -1,6 +1,6 @@
 /// <reference types="@webgpu/types" />
 import React, { useEffect, useRef, useState } from 'react';
-import { Activity, Shield, Zap, ChevronLeft, Layout, MousePointer2, Download } from 'lucide-react';
+import { Activity, Shield, Zap, ChevronLeft, Layout, MousePointer2, Download, Settings, Trophy, Trash2, Database } from 'lucide-react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { Physics, CuboidCollider, InstancedRigidBodies } from '@react-three/rapier';
 import { RaymarcherBackground } from './RaymarcherBackground';
@@ -152,7 +152,7 @@ struct Params1 {
 @compute @workgroup_size(256)
 fn pass1_main(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(workgroup_id) group_id: vec3<u32>, @builtin(local_invocation_id) local_id: vec3<u32>) {
     let global_flat_x = (group_id.x + group_id.y * params1.grid_dim_x) * 256u + local_id.x;
-    let nonce = params1.base_offset + global_flat_x;
+    let nonce = params1.base_offset + (global_flat_x * 1000u);
     
     var a = 0x6a09e667u; var b = 0xbb67ae85u; var c = 0x3c6ef372u; var d = 0xa54ff53au;
     var e = 0x510e527fu; var f = 0x9b05688cu; var g = 0x1f83d9abu; var h = 0x5be0cd19u;
@@ -244,7 +244,7 @@ struct SuccessWinner {
     hash_word0: u32,
     hash_word1: u32,
     distance: f32,
-    pad0: u32,
+    hybrid_mask: u32,
     pad1: u32,
     pad2: u32,
 }
@@ -253,7 +253,11 @@ struct MLWeights {
     apoptosis_threshold: f32,
     cut_round: u32,
     current_floor: u32,
-    viral_mask: u32,
+    viral_mask_alpha: u32,
+    viral_mask_beta: u32,
+    surgery_mode: u32,
+    pad1: u32,
+    pad2: u32,
 }
 
 @group(0) @binding(0) var<storage, read_write> checkpoints: array<Checkpoint>;
@@ -293,10 +297,17 @@ fn pass2_main(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(loca
 
     // Mutate the nonce
     var mutant_nonce = cp.nonce;
-    var current_strain = ml_weights.viral_mask;
+    var hybrid_mask = 0u;
 
-    if (current_strain != 0u) {
-        mutant_nonce = mutant_nonce ^ (current_strain ^ (local_id.x * ml_weights.current_floor));
+    if (ml_weights.surgery_mode != 0u) {
+        if (local_id.x >= 32u) { return; }
+        hybrid_mask = 1u << local_id.x;
+        mutant_nonce = mutant_nonce ^ hybrid_mask;
+    } else if (ml_weights.viral_mask_alpha != 0u || ml_weights.viral_mask_beta != 0u) {
+        let shift_factor = global_id.x % 4u;
+        let hybrid_gene_beta = ml_weights.viral_mask_beta << shift_factor;
+        hybrid_mask = ml_weights.viral_mask_alpha ^ hybrid_gene_beta;
+        mutant_nonce = mutant_nonce ^ hybrid_mask;
     } else {
         // Обычный симбиоз
         mutant_nonce = mutant_nonce ^ (1u << (local_id.x % 32u));
@@ -449,7 +460,7 @@ fn pass2_main(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(loca
     if (total_zeros >= ml_weights.current_floor) {
         let w_idx = atomicAdd(&counters.successes_found, 1u);
         if (w_idx < params2.max_winners) {
-            winners[w_idx] = SuccessWinner(cp.nonce, mutant_nonce, final_h0, final_h1, final_diff_distance, 0u, 0u, 0u);
+            winners[w_idx] = SuccessWinner(cp.nonce, mutant_nonce, final_h0, final_h1, final_diff_distance, hybrid_mask, 0u, 0u);
         }
     }
 }
@@ -489,6 +500,9 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
         remaining: 0
     });
     const [logLines, setLogLines] = useState<{msg: string, type: 'evo' | 'system' | 'spam', time: string, id: number}[]>([]);
+    const superWinnersList = useMinerStore(state => state.superWinners);
+    const clearSuperWinners = useMinerStore(state => state.clearSuperWinners);
+
     const [winnersList, setWinnersList] = useState<{mutant: number, hash0: number, hash1: number, zeros: number}[]>([]);
     const winnersListRef = useRef<{mutant: number, hash0: number, hash1: number, zeros: number}[]>([]);
     const statsAccRef = useRef({ pass1Hdr: 0, pass2Hdr: 0, apoptosis: 0 });
@@ -504,8 +518,6 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
         forceVirusMutation: false,
         anchorChain: [] as {nonce: number, floor: number, mask: number}[],
         currentAnchorIndex: -1,
-        deadZones: [] as {startNonce: number, endNonce: number, mask: number, floorLimit: number}[],
-        maskPageRank: {} as Record<number, {weight: number, successfulJumps: number, deadEnds: number}>,
         fractalMemory: {
             L1_BASE: { minFloor: 17, maxFloor: 19, limit: TOTAL_MEMORY_NODES * 0.50, nodes: [] } as FractalLevel,
             L2_MID:  { minFloor: 20, maxFloor: 25, limit: TOTAL_MEMORY_NODES * 0.25, nodes: [] } as FractalLevel,
@@ -516,6 +528,7 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
     
     const gpuRef = useRef<{ جهاز: GPUDevice | null } | null>(null);
     const loopEnabled = useRef(false);
+    const drillingStartNonceRef = useRef<number>(0);
     const metaCheckpointRef = useRef({ baseNonce: 0 });
     const mlStateRef = useRef({
         threshold: 0.5,
@@ -523,11 +536,43 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
         currentFloor: 22,
         floorMemory: new Map<number, number>(),
         stagnationCounter: 0,
-        viralMask: 0,
-        viralStrikes: 0
+        viralMaskAlpha: 0,
+        viralMaskBeta: 0,
+        viralStrikes: 0,
+        safeVectors: [] as number[],
+        lastFloorBreakTime: Date.now(),
+        surgeryActive: true,
+        anchorStartNonce: 0,
+        anchorMask: 0,
+        failures: 0,
+        successes: 0,
+        currentH: 19.0,
+        totalGlobalCurvature: 0,
+        globalCurvatureSamples: 0
     });
 
     const [epoch, setEpoch] = useState(1);
+    const [hashRate, setHashRate] = useState(0);
+    const hashMetricsRef = useRef({ count: 0, lastTime: 0 });
+
+    const [benchmarkStatus, setBenchmarkStatus] = useState<{ active: boolean, elapsed: number, hashes: number, result?: number } | null>(null);
+    const benchmarkRef = useRef({ active: false, start: 0, hashes: 0 });
+
+    const toggleBenchmark = () => {
+        if (benchmarkRef.current.active) {
+            // Stop early
+            benchmarkRef.current.active = false;
+            setBenchmarkStatus({ active: false, elapsed: performance.now() - benchmarkRef.current.start, hashes: benchmarkRef.current.hashes, result: benchmarkRef.current.hashes });
+        } else {
+            benchmarkRef.current.active = true;
+            benchmarkRef.current.start = performance.now();
+            benchmarkRef.current.hashes = 0;
+            setBenchmarkStatus({ active: true, elapsed: 0, hashes: 0 });
+        }
+    };
+    
+    const [showSettings, setShowSettings] = useState(false);
+    const [logsTab, setLogsTab] = useState<'scan' | '20plus' | 'cache'>('scan');
     
     // Performance controls
     const [intensity, setIntensity] = useState(1);
@@ -552,7 +597,7 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
 
     const compressBrainToDNA = () => {
         let dna = {
-            r: timePressureRef.current.maskPageRank,
+            r: useMinerStore.getState().maskPageRank,
             f: [] as number[][]
         };
         for (let levelKey in timePressureRef.current.fractalMemory) {
@@ -568,7 +613,9 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
         if (!dnaString) return false;
         try {
             let dna = JSON.parse(dnaString);
-            timePressureRef.current.maskPageRank = dna.r || {};
+            if (dna.r) {
+                useMinerStore.setState({ maskPageRank: dna.r });
+            }
             
             for (let k in timePressureRef.current.fractalMemory) {
                 timePressureRef.current.fractalMemory[k as keyof typeof timePressureRef.current.fractalMemory].nodes = [];
@@ -764,7 +811,7 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
 
             const params1Buffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
             const params2Buffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-            const mlWeightsBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+            const mlWeightsBuffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
             const bindGroup1 = device.createBindGroup({
                 layout: bindGroupLayout1,
@@ -790,6 +837,7 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
             setRunning(true);
             
             let baseNonce = metaCheckpointRef.current.baseNonce;
+            drillingStartNonceRef.current = baseNonce;
             let iterCounter = 0;
             const ZERO_TARGET = 17; // Adjust here for difficulty
 
@@ -832,64 +880,48 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
             };
 
             const updateMaskRank = (mask: number, isSuccess: boolean, isDeadZone: boolean) => {
-                if (!timePressureRef.current.maskPageRank[mask]) {
-                    timePressureRef.current.maskPageRank[mask] = { weight: 1.0, successfulJumps: 0, deadEnds: 0 };
-                }
-                
-                let stats = timePressureRef.current.maskPageRank[mask];
-                
-                if (isSuccess) {
-                    stats.successfulJumps++;
-                    stats.weight = stats.weight * 1.5; 
-                }
-                
-                if (isDeadZone) {
-                    stats.deadEnds++;
-                    stats.weight = stats.weight * 0.5; 
-                }
+                useMinerStore.getState().updateMaskRank(mask, isSuccess, isDeadZone);
             };
             
-            const getTopRankedMask = () => {
-                let masks = Object.keys(timePressureRef.current.maskPageRank);
+            const getTopTwoMasks = () => {
+                const globalRank = useMinerStore.getState().maskPageRank;
+                let masks = Object.keys(globalRank);
                 
-                if (masks.length < 5 || Math.random() < 0.2) { 
-                    return Math.floor(Math.random() * 0xFFFFFFFF) >>> 0; 
-                }
-                
-                let totalWeight = 0;
-                for (let m of masks) {
-                    totalWeight += timePressureRef.current.maskPageRank[Number(m)].weight;
-                }
-                
-                let randomThreshold = Math.random() * totalWeight;
-                let cumulativeWeight = 0;
-                
-                for (let m of masks) {
-                    cumulativeWeight += timePressureRef.current.maskPageRank[Number(m)].weight;
-                    if (cumulativeWeight >= randomThreshold) {
-                        return Number(m); 
+                if (masks.length < 2) {
+                    if (masks.length === 1) {
+                        return [Number(masks[0]), Math.floor(Math.random() * 0xFFFFFFFF) >>> 0];
                     }
+                    return [Math.floor(Math.random() * 0xFFFFFFFF) >>> 0, Math.floor(Math.random() * 0xFFFFFFFF) >>> 0];
                 }
                 
-                return Math.floor(Math.random() * 0xFFFFFFFF) >>> 0; 
+                const getScore = (m: string) => globalRank[Number(m)].weight - (globalRank[Number(m)].deadEnds * 50);
+                masks.sort((a, b) => getScore(b) - getScore(a));
+                return [Number(masks[0]), Number(masks[1])];
             };
+
+            const [initAlpha, initBeta] = getTopTwoMasks();
+            mlStateRef.current.viralMaskAlpha = initAlpha;
+            mlStateRef.current.viralMaskBeta = initBeta;
+            mlStateRef.current.anchorMask = initAlpha;
+            mlStateRef.current.anchorStartNonce = baseNonce;
 
             const loop = async () => {
                 if (!loopEnabled.current) return;
 
-                const PASS1_WORKGROUPS = 1024 * configRef.current.intensity;
+                const isSurgery = mlStateRef.current.surgeryActive;
+                const PASS1_WORKGROUPS = isSurgery ? 1 : 1024 * configRef.current.intensity;
                 const pass1WgX = Math.min(PASS1_WORKGROUPS, 65535);
                 const pass1WgY = Math.ceil(PASS1_WORKGROUPS / pass1WgX);
                 const pass1BatchSize = pass1WgX * pass1WgY * 256;
                 const p1Data = new Uint32Array([baseNonce, MAX_CHECKPOINTS, pass1WgX, 0]);
                 device.queue.writeBuffer(params1Buffer, 0, p1Data);
                 
-                const pass2WgX = Math.min(MAX_CHECKPOINTS, 65535);
-                const pass2WgY = Math.ceil(MAX_CHECKPOINTS / pass2WgX);
+                const pass2WgX = isSurgery ? 1 : Math.min(MAX_CHECKPOINTS, 65535);
+                const pass2WgY = Math.ceil((isSurgery ? 1 : MAX_CHECKPOINTS) / pass2WgX);
                 const p2Data = new Uint32Array([MAX_CHECKPOINTS, MAX_WINNERS, ZERO_TARGET, pass2WgX]);
                 device.queue.writeBuffer(params2Buffer, 0, p2Data);
 
-                const mlDataBuf = new ArrayBuffer(16);
+                const mlDataBuf = new ArrayBuffer(32);
                 const mlDataFloat = new Float32Array(mlDataBuf);
                 const mlDataUint = new Uint32Array(mlDataBuf);
                 
@@ -899,7 +931,9 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                 mlDataFloat[0] = FIXED_THRESHOLD;
                 mlDataUint[1] = FIXED_CUT_ROUND;
                 mlDataUint[2] = mlStateRef.current.currentFloor;
-                mlDataUint[3] = mlStateRef.current.viralMask;
+                mlDataUint[3] = mlStateRef.current.viralMaskAlpha;
+                mlDataUint[4] = mlStateRef.current.viralMaskBeta;
+                mlDataUint[5] = isSurgery ? 1 : 0;
                 device.queue.writeBuffer(mlWeightsBuffer, 0, mlDataFloat);
 
                 // Reset counters
@@ -953,10 +987,26 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                         const h0 = winBufUint[i * 8 + 2];
                         const h1 = winBufUint[i * 8 + 3];
                         const dist = winBufFloat[i * 8 + 4];
+                        const hybridMask = winBufUint[i * 8 + 5];
                         const zeros = h0 === 0 ? 32 + Math.clz32(h1) : Math.clz32(h0);
                         
-                        // Если мутант пробил текущий этаж или поднялся выше
-                        if (zeros >= mlStateRef.current.currentFloor) {
+                        let targetFloor = mlStateRef.current.currentFloor;
+                        
+                        if (mlStateRef.current.surgeryActive) {
+                            if (zeros >= targetFloor - 1 && hybridMask !== 0) {
+                                if (!mlStateRef.current.safeVectors.includes(hybridMask)) {
+                                    mlStateRef.current.safeVectors.push(hybridMask);
+                                }
+                            }
+                            if (zeros >= targetFloor) {
+                                newFloorReached = true;
+                                mlStateRef.current.currentFloor = zeros + 1;
+                                nextBaseNonce = mut;
+                                mlStateRef.current.stagnationCounter = 0;
+                                mlStateRef.current.viralStrikes = 0;
+                                if (hybridMask !== 0) updateMaskRank(hybridMask, true, false);
+                            }
+                        } else if (zeros >= targetFloor) {
                             newFloorReached = true;
                             
                             // 1. Лифт едет вверх
@@ -972,6 +1022,10 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                             mlStateRef.current.stagnationCounter = 0;
                             mlStateRef.current.viralStrikes = 0;
                             
+                            if (hybridMask !== 0) {
+                                updateMaskRank(hybridMask, true, false);
+                            }
+                            
                             const msg = `[ЭВОЛЮЦИЯ] Лифт поднялся на этаж ${mlStateRef.current.currentFloor}!`;
                             console.log(msg);
                             addLog(msg, 'evo');
@@ -985,6 +1039,11 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                                     remaining: 50 // record 50 ticks after
                                 };
                             }
+                        } else if (zeros === targetFloor - 1 && zeros > 15) {
+                            // ПОЧТИ ПРОБОЙ (Near Miss). 
+                            // Этаж не повышаем, но бросаем Якорь и прыгаем сюда, чтобы добить этот сектор!
+                            console.log(`⚓ ПЕРСПЕКТИВА: Найден мутант с ${zeros} нулями. Смещение фокуса.`);
+                            nextBaseNonce = mut;
                         }
 
                         const exists = winnersListRef.current.some(p => p.mutant === mut);
@@ -996,6 +1055,7 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                             winnersListRef.current = winnersListRef.current.slice(0, 10); // Keep ONLY top 10
 
                             const minerStore = useMinerStore.getState();
+                            minerStore.addWinner({mutant: mut, hash0: h0, hash1: h1, zeros});
                             
                             // Synchronize PageRank with Global Store
                             if (minerStore.lastParentNode) {
@@ -1010,7 +1070,7 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                             let posX = parent ? parent.posX + 5.0 : 0;
                             
                             // 2. ВЕКТОР (Ось Y): Вычисляем разницу между масками (XOR)
-                            let currentMask = mlStateRef.current.viralMask;
+                            let currentMask = hybridMask;
                             let shiftY = 0;
                             if (parent) {
                                 let maskDelta = (currentMask ^ parent.mask) >>> 0; 
@@ -1022,12 +1082,16 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                             // 3. ГЛУБИНА (Ось Z): Жесткая привязка к этажу
                             let posZ = -zeros * 10;
                             
+                            let startNonce = drillingStartNonceRef.current;
+                            let distance = Math.abs(mut - startNonce);
+                            let trueWeight = distance > 0 ? distance : 1; 
+                            
                             const newNode = {
                                 id: Date.now() + Math.random(),
                                 parentId: parent ? parent.id : null,
-                                minNonce: mut - 5000,
-                                maxNonce: mut + 5000,
-                                weight: 1,
+                                minNonce: Math.min(startNonce, mut),
+                                maxNonce: Math.max(startNonce, mut),
+                                weight: trueWeight,
                                 mask: currentMask,
                                 maxFloor: zeros,
                                 posX,
@@ -1042,6 +1106,7 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                             
                             minerStore.addNode(newNode);
                             minerStore.setLastParentNode(newNode);
+                            drillingStartNonceRef.current = mut;
 
                             addLog(`[БЛОК] Выпал блок с ${zeros} нулями! Hash Start: ${h0.toString(16).padStart(8, '0')}`, 'spam');
                         }
@@ -1076,112 +1141,115 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                         timePressureRef.current.anchorChain.push({
                             nonce: baseNonce,
                             floor: mlStateRef.current.currentFloor,
-                            mask: mlStateRef.current.viralMask
+                            mask: mlStateRef.current.viralMaskAlpha
                         });
                         timePressureRef.current.currentAnchorIndex = timePressureRef.current.anchorChain.length - 1;
                         timePressureRef.current.stuckTicks = 0;
-                        updateMaskRank(mlStateRef.current.viralMask, true, false);
-                        addSynapticLink(baseNonce, mlStateRef.current.currentFloor, mlStateRef.current.viralMask, 1.0);
+                        updateMaskRank(mlStateRef.current.viralMaskAlpha, true, false);
+                        addSynapticLink(baseNonce, mlStateRef.current.currentFloor, mlStateRef.current.viralMaskAlpha, 1.0);
                     }
 
                     if (dT < -80 && mlStateRef.current.currentFloor >= 20) {
-                        const msg = `💥 РАЗРЫВ МЕМБРАНЫ (NDR): ${timePressureRef.current.previousDeltaT}ms -> ${currentDeltaT}ms! Триггер СИНГУЛЯРНОСТИ!`;
+                        const msg = `⚡ АНОМАЛИЯ (NDR): ${timePressureRef.current.previousDeltaT}ms -> ${currentDeltaT}ms!`;
                         addLog(msg, 'evo');
                     }
                     mlStateRef.current.stagnationCounter = 9999;
                 }
 
-                if (timePressureRef.current.stuckTicks > 5 && (dT > 0 || currentDeltaT > 850)) {
-                    let rollbackAnchor = timePressureRef.current.currentAnchorIndex > 0 ? timePressureRef.current.anchorChain[timePressureRef.current.currentAnchorIndex - 1] : { nonce: baseNonce, floor: mlStateRef.current.currentFloor, mask: mlStateRef.current.viralMask };
-                    let zoneStart = rollbackAnchor.nonce;
-                    let zoneEnd = baseNonce;
-                    
-                    timePressureRef.current.deadZones.push({
-                        startNonce: Math.min(zoneStart, zoneEnd),
-                        endNonce: Math.max(zoneStart, zoneEnd),
-                        mask: mlStateRef.current.viralMask,
-                        floorLimit: timePressureRef.current.lastFloor
-                    });
-                    
-                    updateMaskRank(mlStateRef.current.viralMask, false, true);
-                    
-                    const dzMsg = `🌌 ПРОСТРАНСТВО ОТСЕЧЕНО: Заблокирован диапазон от ${Math.min(zoneStart, zoneEnd)} до ${Math.max(zoneStart, zoneEnd)} для маски 0x${mlStateRef.current.viralMask.toString(16)}`;
-                    console.log(dzMsg);
-                    addLog(dzMsg, 'system');
-
-                    if (timePressureRef.current.currentAnchorIndex > 0) {
-                        timePressureRef.current.currentAnchorIndex--;
-                        let currentRollback = timePressureRef.current.anchorChain[timePressureRef.current.currentAnchorIndex];
-                        const msg = `⏪ ОТКАТ (n-1): Тупик. Возврат на этаж ${currentRollback.floor} (Нонс: ${currentRollback.nonce})`;
-                        addLog(msg, 'system');
-                        
-                        nextBaseNonce = currentRollback.nonce;
-                        mlStateRef.current.currentFloor = currentRollback.floor;
-                        baseNonce = nextBaseNonce;
-                        metaCheckpointRef.current.baseNonce = baseNonce;
-                        
-                        // Меняем маску для отталкивания на основе PageRank
-                        mlStateRef.current.viralMask = getTopRankedMask();
-                    } else {
-                        const msg = `⚠️ ВЯЗКОСТЬ: Топчемся на ${mlStateRef.current.currentFloor} эт. ${timePressureRef.current.stuckTicks} тиков. Сброс (Hard Reset).`;
-                        addLog(msg, 'system');
-                        timePressureRef.current.forceVirusMutation = true;
-                    }
-                    timePressureRef.current.stuckTicks = 0;
-                }
-
                 timePressureRef.current.previousDeltaT = currentDeltaT;
                 timePressureRef.current.lastDispatchTime = now;
 
-                const STAGNATION_LIMIT = 150;
+                if (mlStateRef.current.surgeryActive && mlStateRef.current.safeVectors.length >= 2) {
+                    mlStateRef.current.surgeryActive = false; // Switch to Ricci Flow
+                }
+                
                 if (newFloorReached) {
-                    mlStateRef.current.stagnationCounter = 0;
-                    mlStateRef.current.viralMask = 0;
+                    mlStateRef.current.successes++;
                 } else {
-                    mlStateRef.current.stagnationCounter++;
+                    mlStateRef.current.failures++;
                 }
 
-                // === ВСПЫШКА ВИРУСА ===
-                if (mlStateRef.current.stagnationCounter > 150) {
-                    if (mlStateRef.current.currentFloor % 2 !== 0 || mlStateRef.current.stagnationCounter > 9000) { // Дыхание: работаем только в Диастолу
-                        // 1. Читаем физику роя
-                        let swarmHash = Math.abs(oracleState.x * 1000 + oracleState.y * 1000 + oracleState.z * 1000);
-                        
-                        // 2. Читаем тяжелую память из RAM
-                        let momentum = calculateHistoricalMomentum();
-                        let momentumHash = Math.abs(momentum.x * 100 + momentum.y * 100 + Math.sin(momentum.z) * 100);
-                        
-                        // 3. Вычисляем Резонансный Бит
-                        let resonantBit = Math.floor(swarmHash + momentumHash + mlStateRef.current.viralStrikes) % 32;
-                        let newMask = 1 << resonantBit;
+                const totalProbes = mlStateRef.current.failures + mlStateRef.current.successes;
+                const curvature = mlStateRef.current.failures / (mlStateRef.current.successes + 1);
 
-                        if (timePressureRef.current.forceVirusMutation) {
-                            newMask = getTopRankedMask();
-                            timePressureRef.current.forceVirusMutation = false;
-                        }
+                let surgeryExecuted = false;
 
-                        mlStateRef.current.viralMask = newMask;
-                        mlStateRef.current.viralStrikes++; // Вращаем барабан на случай следующей неудачи
+                // Сбор статистики глобальной кривизны (Ricci Heatmap)
+                if (totalProbes >= 50) {
+                    surgeryExecuted = true;
+                    const msg = `🔪 ТРУБА: Нет нового этажа за 50 батчей. Сжатие отрезка. (маска 0x${mlStateRef.current.anchorMask.toString(16)})`;
+                    console.log(msg);
+                    addLog(msg, 'evo');
                         
-                        const msg = `☣️ СИНГУЛЯРНОСТЬ: Рой и RAM активированы. Маска 0x${newMask.toString(16)} (Удар ${mlStateRef.current.viralStrikes})`;
-                        console.log(msg);
-                        addLog(msg, 'evo');
+                        useMinerStore.getState().addDeadZonePipe({
+                            id: crypto.randomUUID(),
+                            startNonce: mlStateRef.current.anchorStartNonce,
+                            endNonce: baseNonce,
+                            hashTrack: pass1BatchSize * totalProbes * 1000,
+                            peakZeros: mlStateRef.current.currentFloor,
+                            peakMask: mlStateRef.current.anchorMask
+                        });
                         
-                        // 4. Записываем текущее состояние Роя в Глобальную RAM
-                        if (shadowCursor < SHADOW_GRAPH_SIZE - 3) {
-                            globalShadowGraph[shadowCursor] = oracleState.x;
-                            globalShadowGraph[shadowCursor+1] = oracleState.y;
-                            globalShadowGraph[shadowCursor+2] = oracleState.z;
-                            shadowCursor += 3;
+                        useMinerStore.getState().penalizeMask(mlStateRef.current.anchorMask);
+                         
+                        // Hard Reset (прыжок на другой узел)
+                        let store = useMinerStore.getState();
+                        let globalNodes = [
+                            ...store.quotas.L1_BASE.nodes,
+                            ...store.quotas.L2_MID.nodes,
+                            ...store.quotas.L3_DEEP.nodes,
+                            ...store.quotas.L4_SINGULARITY.nodes
+                        ];
+                        if (globalNodes.length > 0) {
+                            globalNodes.sort((a, b) => b.maxFloor - a.maxFloor);
+                            const topCount = Math.max(3, Math.ceil(globalNodes.length * 0.05));
+                            const topNodes = globalNodes.slice(0, topCount);
+                            let randomNode = topNodes[Math.floor(Math.random() * topNodes.length)];
+                            nextBaseNonce = randomNode.minNonce;
+                            mlStateRef.current.currentFloor = randomNode.maxFloor;
+                        } else {
+                            nextBaseNonce = baseNonce + 1000000000; // Jump away if empty
                         }
-                    } else {
-                        mlStateRef.current.viralMask = 0;
-                        mlStateRef.current.viralStrikes = 0;
-                        const msg = `⏳ СИСТОЛА: Вирус спит. Квантовый коллапс активен.`;
-                        console.log(msg);
-                        addLog(msg, 'evo');
+                        
+                        // Меняем маску для отталкивания на основе PageRank
+                        const [alpha, beta] = getTopTwoMasks();
+                        mlStateRef.current.viralMaskAlpha = alpha;
+                        mlStateRef.current.viralMaskBeta = beta;
+                        mlStateRef.current.anchorMask = alpha; // Сохраняем Якорь
+                        mlStateRef.current.anchorStartNonce = nextBaseNonce;
+                        
+                        mlStateRef.current.lastFloorBreakTime = now;
+                        mlStateRef.current.safeVectors = [];
+                        mlStateRef.current.surgeryActive = true; // Reboot scanning
+                        mlStateRef.current.failures = 0;
+                        mlStateRef.current.successes = 0;
+                        drillingStartNonceRef.current = nextBaseNonce;
                     }
+
+                    if (!surgeryExecuted && mlStateRef.current.safeVectors.length >= 2) {
+                        const safePool = mlStateRef.current.safeVectors;
+                        let poolCopy = [...safePool];
+                        // Перемешиваем массив (Fisher-Yates)
+                        for (let i = poolCopy.length - 1; i > 0; i--) {
+                            const j = Math.floor(Math.random() * (i + 1));
+                            [poolCopy[i], poolCopy[j]] = [poolCopy[j], poolCopy[i]];
+                        }
+                        const m1 = poolCopy[0];
+                        const m2 = poolCopy[1];
+                        const m3 = poolCopy.length > 2 ? poolCopy[2] : 0;
+                        mlStateRef.current.viralMaskAlpha = m1 | m2 | m3;
+                        mlStateRef.current.viralMaskBeta = 0;
+                    }
+
+                if (newFloorReached) {
+                    mlStateRef.current.lastFloorBreakTime = now;
+                    mlStateRef.current.safeVectors = [];
+                    mlStateRef.current.surgeryActive = true;
                     mlStateRef.current.stagnationCounter = 0;
+                    mlStateRef.current.viralMaskAlpha = 0;
+                    mlStateRef.current.viralMaskBeta = 0;
+                    mlStateRef.current.failures = 0;
+                    mlStateRef.current.successes = 0;
                 }
                 
                 const totalPass2 = cps * 256;
@@ -1196,7 +1264,7 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                     cps: cps,
                     apoptosis: apoptosisKills,
                     floor: mlStateRef.current.currentFloor,
-                    viralMask: mlStateRef.current.viralMask,
+                    viralMask: mlStateRef.current.viralMaskAlpha,
                     totalPass1: statsAccRef.current.pass1Hdr,
                     totalPass2: statsAccRef.current.pass2Hdr,
                     totalApoptosis: statsAccRef.current.apoptosis
@@ -1235,11 +1303,12 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                     cps: cps,
                     hr: (s.pass1Hdr + pass1BatchSize),
                     apoptosis: s.apoptosis + apoptosisKills,
-                    viralMask: mlStateRef.current.viralMask
+                    viralMask: mlStateRef.current.viralMaskAlpha
                 }));
 
                 if (nextBaseNonce !== null) {
                     baseNonce = nextBaseNonce;
+                    drillingStartNonceRef.current = baseNonce;
                 } else {
                     let navigated = false;
                     // Фрактальная Навигация
@@ -1279,32 +1348,32 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                                 console.log(msg);
                                 addLog(msg, 'evo');
                                 baseNonce = targetNonce;
+                                drillingStartNonceRef.current = baseNonce;
                                 navigated = true;
                             }
                         }
                     }
 
                     if (!navigated) {
-                        baseNonce += pass1BatchSize;
+                        baseNonce += (pass1BatchSize * 1000);
                     }
                 }
 
                 // Предиктивный фильтр: Квантовый прыжок через диапазоны
-                let isInsideDeadZone = true;
-                while (isInsideDeadZone) {
-                    isInsideDeadZone = false;
-                    for (let i = 0; i < timePressureRef.current.deadZones.length; i++) {
-                        let zone = timePressureRef.current.deadZones[i];
-                        
-                        if (baseNonce >= zone.startNonce && baseNonce <= zone.endNonce) {
-                            if (mlStateRef.current.viralMask === zone.mask) {
-                                const msg = `⚡ ПРЫЖОК СКВОЗЬ ПРОСТРАНСТВО: Пропуск мертвой зоны. Сдвиг на границу.`;
-                                console.log(msg);
-                                addLog(msg, 'evo');
-                                baseNonce = zone.endNonce + 1000000; 
-                                isInsideDeadZone = true;
-                                break;
-                            }
+                let isValid = false;
+                while (!isValid) {
+                    isValid = true;
+                    const deadPipes = useMinerStore.getState().deadZonePipes;
+                    for (let i = 0; i < deadPipes.length; i++) {
+                        let zone = deadPipes[i];
+                        if (mlStateRef.current.viralMaskAlpha === zone.peakMask && baseNonce >= zone.startNonce && baseNonce <= zone.endNonce) {
+                            const msg = `⚡ ПРЫЖОК СКВОЗЬ ПРОСТРАНСТВО: Пропуск мертвой зоны. Сдвиг на границу.`;
+                            console.log(msg);
+                            addLog(msg, 'evo');
+                            baseNonce = zone.endNonce + 1;
+                            drillingStartNonceRef.current = baseNonce;
+                            isValid = false;
+                            break;
                         }
                     }
                 }
@@ -1319,6 +1388,29 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                         baseNonce: baseNonce,
                         winnersList: winnersListRef.current
                     }));
+                }
+
+                hashMetricsRef.current.count += pass1BatchSize;
+                
+                if (benchmarkRef.current.active) {
+                    benchmarkRef.current.hashes += pass1BatchSize;
+                }
+
+                const _now = performance.now();
+                if (_now - hashMetricsRef.current.lastTime >= 1000) {
+                    setHashRate(hashMetricsRef.current.count / ((_now - hashMetricsRef.current.lastTime) / 1000));
+                    hashMetricsRef.current.count = 0;
+                    hashMetricsRef.current.lastTime = _now;
+                    
+                    if (benchmarkRef.current.active) {
+                        const elapsedMs = _now - benchmarkRef.current.start;
+                        if (elapsedMs >= 600_000) { // 10 mins
+                            benchmarkRef.current.active = false;
+                            setBenchmarkStatus({ active: false, elapsed: 600_000, hashes: benchmarkRef.current.hashes, result: benchmarkRef.current.hashes });
+                        } else {
+                            setBenchmarkStatus({ active: true, elapsed: elapsedMs, hashes: benchmarkRef.current.hashes });
+                        }
+                    }
                 }
 
                 requestAnimationFrame(loop);
@@ -1340,8 +1432,18 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                 <div className="flex items-center gap-2 md:gap-4 flex-1">
                     <Activity className="w-5 h-5 min-w-[20px] animate-pulse hidden sm:block" />
                     <div className="flex-1">
-                        <h1 className="text-sm md:text-xl font-black tracking-tighter leading-tight uppercase flex items-center gap-2">
-                            <Zap className="w-4 h-4" /> Two-Pass Shader Architecture
+                        <h1 className="text-sm md:text-xl font-black tracking-tighter leading-tight uppercase flex items-center gap-2 flex-wrap min-w-0">
+                            <Zap className="w-4 h-4 shrink-0" /> <span className="truncate">Two-Pass Shader Architecture</span>
+                            <span className="ml-1 px-2 py-0.5 bg-[#FF00FF]/20 text-[#FF00FF] text-xs max-sm:text-[10px] rounded border border-[#FF00FF]/50 whitespace-nowrap shrink-0">{(hashRate / 1000).toFixed(1)} kH/s</span>
+                            {benchmarkStatus?.active ? (
+                                <button onClick={toggleBenchmark} className="ml-1 px-2 py-0.5 bg-yellow-500/20 text-yellow-400 text-xs max-sm:text-[10px] rounded border border-yellow-500/50 flex items-center justify-center gap-1 transition-colors hover:bg-yellow-500 hover:text-black shrink-0 whitespace-nowrap flex-1 lg:flex-none">
+                                    ⏱️ {Math.floor(benchmarkStatus.elapsed / 60000)}:{(Math.floor(benchmarkStatus.elapsed / 1000) % 60).toString().padStart(2, '0')} | {benchmarkStatus.hashes.toLocaleString()}
+                                </button>
+                            ) : (
+                                <button onClick={toggleBenchmark} className="ml-1 px-2 py-0.5 bg-gray-500/20 text-gray-400 text-xs max-sm:text-[10px] rounded border border-gray-500/50 flex items-center justify-center gap-1 transition-colors hover:bg-yellow-500/20 hover:text-yellow-400 hover:border-yellow-500/50 shrink-0 whitespace-nowrap flex-1 lg:flex-none">
+                                    ⏱️ {benchmarkStatus?.result ? `10m: ${benchmarkStatus.result.toLocaleString()}` : "10m Bench"}
+                                </button>
+                            )}
                         </h1>
                         <p className="text-[8px] md:text-[10px] opacity-60 leading-tight mt-1">Отказ от 64 раундов: Pass 1 Scouts (0-24), Сheckpointing, Pass 2 Stormtroopers (25-63)</p>
                     </div>
@@ -1379,65 +1481,88 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                             {running ? 'STOP PIPELINE' : 'LAUNCH PIPELINE'}
                         </button>
 
-                        <div className="flex flex-col gap-2 border border-[#00FF41]/30 p-2 mt-2">
-                            <span className="text-[10px] uppercase opacity-70">Настройки Нагрузки Железа</span>
-                            
-                            <div className="flex flex-col gap-1">
-                                <span className="text-[9px] opacity-50 flex justify-between">
-                                    <span>GPU: ХЕШ ВОРКЕРЫ (Увеличит нагрузку на видеоядро)</span>
-                                    <span className="text-[#00FF41]">{intensity}x</span>
-                                </span>
-                                <input 
-                                    type="range" min="1" max="1000" step="1" 
-                                    value={intensity} 
-                                    onChange={(e) => updateIntensity(parseInt(e.target.value))}
-                                    className="w-full cursor-pointer accent-[#00FF41]"
-                                />
-                                <span className="text-[8px] text-[#00FF41]/50 mb-2">~ {(262144 * intensity).toLocaleString()} хешей/кадр</span>
-                            </div>
+                        <button
+                            onClick={() => setShowSettings(true)}
+                            className="w-full py-2 mt-2 text-[10px] uppercase transition-colors flex justify-center items-center gap-2 border border-gray-600 bg-[#1a1b1e] text-gray-400 hover:bg-[#2a2b2e] hover:text-white"
+                        >
+                            <Settings className="w-3 h-3" /> Настройки железа
+                        </button>
 
-                            <div className="flex flex-col gap-1">
-                                <span className="text-[9px] opacity-50 flex justify-between">
-                                    <span>VRAM: ВЫДЕЛЕНИЕ ПАМЯТИ (Применится при перезапуске)</span>
-                                    <span className="text-[#00FF41]">{vramScale}x</span>
-                                </span>
-                                <input 
-                                    type="range" min="1" max="200" step="1" 
-                                    value={vramScale} 
-                                    onChange={(e) => updateConfig('vramScale', parseInt(e.target.value))}
-                                    className="w-full cursor-pointer accent-[#00FF41]"
-                                />
-                                <span className="text-[8px] text-[#00FF41]/50 mb-2">Объем буферов: {8192 * vramScale} слотов</span>
-                            </div>
+                        {showSettings && (
+                            <div className="fixed inset-0 z-[100] bg-black/80 backdrop-blur-sm flex justify-center items-center p-4">
+                                <div className="bg-[#1f2022] border border-[#3b3c3e] rounded-xl shadow-2xl p-6 w-full max-w-md flex flex-col gap-6 font-sans text-gray-200">
+                                    <div className="flex justify-between items-center text-gray-100 border-b border-[#3b3c3e] pb-3">
+                                        <h3 className="font-bold text-lg flex items-center gap-2">
+                                            <Settings className="w-5 h-5" /> Настройки железа
+                                        </h3>
+                                        <button 
+                                            onClick={() => setShowSettings(false)}
+                                            className="text-gray-400 hover:text-white transition-colors"
+                                        >
+                                            ✕
+                                        </button>
+                                    </div>
+                                    
+                                    <div className="flex flex-col gap-5">
+                                        <div className="flex flex-col gap-2">
+                                            <div className="flex justify-between items-center">
+                                                <span className="text-sm font-medium">GPU: Хеш-воркеры</span>
+                                                <span className="text-xs bg-[#2a2b2e] px-2 py-1 rounded border border-[#3b3c3e] text-gray-300">{intensity}x</span>
+                                            </div>
+                                            <input 
+                                                type="range" min="1" max="1000" step="1" 
+                                                value={intensity} 
+                                                onChange={(e) => updateIntensity(parseInt(e.target.value))}
+                                                className="w-full h-1 bg-[#3b3c3e] rounded-lg appearance-none cursor-pointer"
+                                            />
+                                            <span className="text-xs text-gray-400">~ {(262144 * intensity).toLocaleString()} хешей/кадр</span>
+                                        </div>
 
-                            <div className="flex flex-col gap-1">
-                                <span className="text-[9px] opacity-50 flex justify-between">
-                                    <span>RAM / HEAP: РАЗМЕР ХВОСТОВ (JS Массивы)</span>
-                                    <span className="text-[#00FF41]">{memoryScale}x</span>
-                                </span>
-                                <input 
-                                    type="range" min="1" max="2000" step="1" 
-                                    value={memoryScale} 
-                                    onChange={(e) => updateConfig('memoryScale', parseInt(e.target.value))}
-                                    className="w-full cursor-pointer accent-[#00FF41]"
-                                />
-                                <span className="text-[8px] text-[#00FF41]/50 mb-2">{50 * memoryScale} записей в хвосте</span>
-                            </div>
+                                        <div className="flex flex-col gap-2">
+                                            <div className="flex justify-between items-center">
+                                                <span className="text-sm font-medium">VRAM: Выделение памяти</span>
+                                                <span className="text-xs bg-[#2a2b2e] px-2 py-1 rounded border border-[#3b3c3e] text-gray-300">{vramScale}x</span>
+                                            </div>
+                                            <input 
+                                                type="range" min="1" max="200" step="1" 
+                                                value={vramScale} 
+                                                onChange={(e) => updateConfig('vramScale', parseInt(e.target.value))}
+                                                className="w-full h-1 bg-[#3b3c3e] rounded-lg appearance-none cursor-pointer"
+                                            />
+                                            <span className="text-xs text-gray-400">Объем буферов: {8192 * vramScale} слотов (требует рестарт)</span>
+                                        </div>
 
-                            <div className="flex flex-col gap-1">
-                                <span className="text-[9px] opacity-50 flex justify-between">
-                                    <span>LOCALSTORAGE: ЧАСТОТА ЗАПИСИ (I/O)</span>
-                                    <span className="text-[#00FF41]">{lsWriteRate}x</span>
-                                </span>
-                                <input 
-                                    type="range" min="1" max="60" step="1" 
-                                    value={lsWriteRate} 
-                                    onChange={(e) => updateConfig('lsWriteRate', parseInt(e.target.value))}
-                                    className="w-full cursor-pointer accent-[#00FF41]"
-                                />
-                                <span className="text-[8px] text-[#00FF41]/50">Запись каждые {Math.max(1, Math.floor(60 / lsWriteRate))} итераций</span>
+                                        <div className="flex flex-col gap-2">
+                                            <div className="flex justify-between items-center">
+                                                <span className="text-sm font-medium">RAM: Размер хвостов</span>
+                                                <span className="text-xs bg-[#2a2b2e] px-2 py-1 rounded border border-[#3b3c3e] text-gray-300">{memoryScale}x</span>
+                                            </div>
+                                            <input 
+                                                type="range" min="1" max="2000" step="1" 
+                                                value={memoryScale} 
+                                                onChange={(e) => updateConfig('memoryScale', parseInt(e.target.value))}
+                                                className="w-full h-1 bg-[#3b3c3e] rounded-lg appearance-none cursor-pointer"
+                                            />
+                                            <span className="text-xs text-gray-400">{50 * memoryScale} записей в хвосте</span>
+                                        </div>
+
+                                        <div className="flex flex-col gap-2">
+                                            <div className="flex justify-between items-center">
+                                                <span className="text-sm font-medium">I/O: Частота записи</span>
+                                                <span className="text-xs bg-[#2a2b2e] px-2 py-1 rounded border border-[#3b3c3e] text-gray-300">{lsWriteRate}x</span>
+                                            </div>
+                                            <input 
+                                                type="range" min="1" max="60" step="1" 
+                                                value={lsWriteRate} 
+                                                onChange={(e) => updateConfig('lsWriteRate', parseInt(e.target.value))}
+                                                className="w-full h-1 bg-[#3b3c3e] rounded-lg appearance-none cursor-pointer"
+                                            />
+                                            <span className="text-xs text-gray-400">Запись каждые {Math.max(1, Math.floor(60 / lsWriteRate))} итераций</span>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
-                        </div>
+                        )}
 
                         <button 
                             onClick={exportCSV}
@@ -1472,18 +1597,9 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                             <div className="flex gap-2 text-[10px]">
                                 <button 
                                     onClick={exportEvolutionCSV}
-                                    className="flex-1 py-1 flex items-center justify-center gap-1 border border-blue-400/50 bg-blue-400/10 text-blue-400 hover:bg-blue-400 hover:text-black transition-colors"
+                                    className="w-full py-1 flex items-center justify-center gap-1 border border-blue-400/50 bg-blue-400/10 text-blue-400 hover:bg-blue-400 hover:text-black transition-colors"
                                 >
                                     <Download className="w-3 h-3" /> СКАЧАТЬ CSV (ХВОСТЫ)
-                                </button>
-                                <button 
-                                    onClick={() => {
-                                        setRecordedSlots([]);
-                                        localStorage.removeItem('twopass_evolution_logs');
-                                    }}
-                                    className="flex-1 py-1 flex items-center justify-center gap-1 border border-red-500/50 bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-red-100 transition-colors"
-                                >
-                                    ОЧИСТИТЬ (L.S.)
                                 </button>
                             </div>
                         </div>
@@ -1524,19 +1640,108 @@ export function TwoPassMiner({ onClose }: { onClose: () => void }) {
                     <div className="p-4 border border-[#00FF41]/30 bg-black/80 flex flex-col h-64 shrink-0 overflow-hidden relative">
                         <div className="flex justify-between items-center border-b border-[#00FF41]/30 pb-2 mb-2 sticky top-0 bg-black z-10">
                             <div className="flex gap-4 items-center">
-                                <span className="text-sm font-bold uppercase text-[#00FF41]">ЖУРНАЛ СКАНИРОВАНИЯ (ВСЕ БЛОКИ)</span>
+                                <button 
+                                    onClick={() => setLogsTab('scan')} 
+                                    className={`text-sm font-bold uppercase transition-colors ${logsTab === 'scan' ? 'text-[#00FF41]' : 'text-gray-500 hover:text-[#00FF41]/70'}`}
+                                >
+                                    ЖУРНАЛ СКАНИРОВАНИЯ
+                                </button>
+                                <button 
+                                    onClick={() => setLogsTab('20plus')} 
+                                    className={`text-sm font-bold uppercase transition-colors flex items-center gap-2 ${logsTab === '20plus' ? 'text-yellow-400' : 'text-gray-500 hover:text-yellow-400/70'}`}
+                                >
+                                    <Trophy size={14} /> 20+ ПРОБИТИЕ ({superWinnersList.length})
+                                </button>
+                                <button 
+                                    onClick={() => setLogsTab('cache')} 
+                                    className={`text-sm font-bold uppercase transition-colors flex items-center gap-2 ${logsTab === 'cache' ? 'text-blue-400' : 'text-gray-500 hover:text-blue-400/70'}`}
+                                >
+                                    <Database size={14} /> УПРАВЛЕНИЕ КЭШОМ
+                                </button>
                             </div>
-                            <button 
-                                onClick={() => {
-                                    const textBytes = logLines.filter(l => l.type !== 'evo').map(l => `[${l.time}] ${l.msg}`).join('\n');
-                                    navigator.clipboard.writeText(textBytes);
-                                }} 
-                                className="text-[10px] hover:text-white px-2 py-1 border border-[#00FF41]/30 flex items-center gap-1 transition-colors hover:bg-[#00FF41]/20">
-                                <Download size={10} />
-                            </button>
+                            <div className="flex gap-2">
+                                {logsTab === '20plus' && superWinnersList.length > 0 && (
+                                    <button 
+                                        onClick={clearSuperWinners}
+                                        className="text-[10px] text-red-500 hover:text-red-300 px-2 py-1 border border-red-500/30 flex items-center gap-1 transition-colors hover:bg-red-500/20">
+                                        <Trash2 size={10} />
+                                    </button>
+                                )}
+                                {logsTab !== 'cache' && (
+                                    <button 
+                                        onClick={() => {
+                                            if (logsTab === 'scan') {
+                                                const textBytes = logLines.filter(l => l.type !== 'evo').map(l => `[${l.time}] ${l.msg}`).join('\n');
+                                                navigator.clipboard.writeText(textBytes);
+                                            } else {
+                                                const textBytes = superWinnersList.map(w => `[${w.time}] Z: ${w.zeros} | Nonce: ${w.mutant} | H0: ${w.hash0.toString(16).padStart(8,'0')} | H1: ${w.hash1.toString(16).padStart(8,'0')}`).join('\n');
+                                                navigator.clipboard.writeText(textBytes);
+                                            }
+                                        }} 
+                                        className="text-[10px] hover:text-white px-2 py-1 border border-[#00FF41]/30 flex items-center gap-1 transition-colors hover:bg-[#00FF41]/20">
+                                        <Download size={10} />
+                                    </button>
+                                )}
+                            </div>
                         </div>
                         <div className="flex-1 overflow-y-auto text-[10px] space-y-1 opacity-80 pb-2">
-                            {logLines.filter(l => l.type !== 'evo').map((l, i) => <div key={i} className={l.type === 'system' ? 'text-red-400' : ''}><span className="opacity-50">[{l.time}]</span> {l.msg}</div>)}
+                            {logsTab === 'cache' ? (
+                                <div className="space-y-2 p-2 mt-2 w-full max-w-sm">
+                                    <button 
+                                        onClick={() => {
+                                            setRecordedSlots([]);
+                                            localStorage.removeItem('twopass_evolution_logs');
+                                        }}
+                                        className="w-full py-2 px-3 flex items-center justify-between border border-red-500/50 bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-red-100 transition-colors"
+                                    >
+                                        <span>СБРОС ЭВОЛЮЦИИ ДНК (L.S.)</span>
+                                        <Trash2 className="w-4 h-4" />
+                                    </button>
+                                    <button 
+                                        onClick={() => {
+                                            setWinnersList([]);
+                                            localStorage.removeItem('twopass_meta_state');
+                                            localStorage.removeItem('miner_super_winners');
+                                            clearSuperWinners();
+                                        }}
+                                        className="w-full py-2 px-3 flex items-center justify-between border border-red-500/50 bg-red-500/10 text-red-400 hover:bg-red-500 hover:text-red-100 transition-colors"
+                                    >
+                                        <span>УДАЛИТЬ ЧЕКПОИНТЫ & ПОБЕДИТЕЛЕЙ (L.S.)</span>
+                                        <Trash2 className="w-4 h-4" />
+                                    </button>
+                                    <button 
+                                        onClick={() => {
+                                            setLogLines([]);
+                                        }}
+                                        className="w-full py-2 px-3 flex items-center justify-between border border-orange-500/50 bg-orange-500/10 text-orange-400 hover:bg-orange-500 hover:text-orange-100 transition-colors"
+                                    >
+                                        <span>ОЧИСТИТЬ ЖУРНАЛ СКАНИРОВАНИЯ</span>
+                                        <Trash2 className="w-4 h-4" />
+                                    </button>
+                                    <div className="text-[10px] text-gray-400 mt-4 p-2 border border-blue-500/20 bg-blue-500/5">
+                                        <span className="text-blue-400 font-bold">INFO:</span> Сброс глобальной базы памяти узлов фрактала выполняется процессом Hard Reset, кэш очищается автоматически.
+                                    </div>
+                                </div>
+                            ) : logsTab === 'scan' ? (
+                                logLines.filter(l => l.type !== 'evo').map((l, i) => <div key={i} className={l.type === 'system' ? 'text-red-400' : ''}><span className="opacity-50">[{l.time}]</span> {l.msg}</div>)
+                            ) : (
+                                superWinnersList.length === 0 ? (
+                                    <div className="opacity-50 text-center mt-6 text-yellow-500/50">Ожидание пробитий 20+ нулей...</div>
+                                ) : (
+                                    <div className="space-y-1 w-full text-yellow-200">
+                                        {superWinnersList.map((w, i) => (
+                                            <div key={i} className="flex gap-4 border-b border-yellow-500/20 pb-1">
+                                                <span className="opacity-50">[{w.time}]</span>
+                                                <span className="text-yellow-400 font-bold w-12">Z: {w.zeros}</span>
+                                                <span className="font-mono">Mut: {w.mutant}</span>
+                                                <span className="font-mono opacity-70 ml-auto">
+                                                    {w.hash0.toString(16).padStart(8, '0')}{w.hash1.toString(16).padStart(8, '0')}
+                                                </span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )
+                            )}
                         </div>
                     </div>
                 </div>
